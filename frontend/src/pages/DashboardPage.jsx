@@ -49,7 +49,8 @@ import {
 } from 'lucide-react';
 import ChangePasswordDialog from '../components/ChangePasswordDialog';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
+// Use relative URL if REACT_APP_BACKEND_URL is not set (for self-hosted deployments)
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || '';
 const API = `${BACKEND_URL}/api`;
 
 export default function DashboardPage() {
