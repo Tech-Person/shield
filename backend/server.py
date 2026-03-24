@@ -971,6 +971,23 @@ app.add_middleware(
 if STATIC_DIR.exists() and (STATIC_DIR / "static").exists():
     app.mount("/static", StaticFiles(directory=STATIC_DIR / "static"), name="static")
 
+# Serve favicon
+@app.get("/favicon.svg")
+async def serve_favicon():
+    """Serve the favicon"""
+    favicon_file = STATIC_DIR / "favicon.svg"
+    if favicon_file.exists():
+        return FileResponse(favicon_file, media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="Favicon not found")
+
+@app.get("/favicon.ico")
+async def serve_favicon_ico():
+    """Serve favicon.ico (redirect to svg or return svg)"""
+    favicon_file = STATIC_DIR / "favicon.svg"
+    if favicon_file.exists():
+        return FileResponse(favicon_file, media_type="image/svg+xml")
+    raise HTTPException(status_code=404, detail="Favicon not found")
+
 # Serve index.html for all non-API routes (SPA support)
 @app.get("/{full_path:path}")
 async def serve_spa(request: Request, full_path: str):
