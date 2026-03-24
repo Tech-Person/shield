@@ -2,7 +2,6 @@ from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 from pathlib import Path
@@ -13,15 +12,15 @@ from datetime import datetime, timezone, timedelta
 import jwt
 import bcrypt
 import subprocess
-import re
+import sqlite3
+import json
+from contextlib import contextmanager
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# SQLite Database Configuration
+DB_PATH = os.environ.get('DB_PATH', str(ROOT_DIR / 'port_forward.db'))
 
 # JWT Configuration
 JWT_SECRET = os.environ.get('JWT_SECRET', 'port-forward-manager-secret-key-change-in-production')
@@ -46,12 +45,72 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ==================== DATABASE SETUP ====================
+
+@contextmanager
+def get_db():
+    """Context manager for database connections"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+def init_database():
+    """Initialize SQLite database with required tables"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Create users table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                must_change_password INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                last_login TEXT
+            )
+        ''')
+        
+        # Create port_rules table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS port_rules (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                external_port INTEGER NOT NULL UNIQUE,
+                internal_port INTEGER NOT NULL,
+                protocol TEXT NOT NULL DEFAULT 'both',
+                description TEXT DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                created_by TEXT NOT NULL,
+                is_outside_safe_range INTEGER NOT NULL DEFAULT 0
+            )
+        ''')
+        
+        # Create indexes
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_port_rules_external_port ON port_rules(external_port)')
+
+def dict_from_row(row):
+    """Convert sqlite3.Row to dictionary"""
+    if row is None:
+        return None
+    return dict(row)
+
 # ==================== MODELS ====================
 
 class UserCreate(BaseModel):
     username: str
     password: str
-    role: str = "user"  # "admin" or "user"
+    role: str = "user"
 
 class UserLogin(BaseModel):
     username: str
@@ -74,7 +133,7 @@ class PortRuleCreate(BaseModel):
     name: str
     external_port: int
     internal_port: int
-    protocol: str = "both"  # "tcp", "udp", or "both"
+    protocol: str = "both"
     description: Optional[str] = ""
 
 class PortRuleUpdate(BaseModel):
@@ -134,9 +193,15 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid token")
         
-        user = await db.users.find_one({"id": user_id}, {"_id": 0})
+        with get_db() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+            user = dict_from_row(cursor.fetchone())
+        
         if not user:
             raise HTTPException(status_code=401, detail="User not found")
+        
+        user['must_change_password'] = bool(user['must_change_password'])
         return user
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
@@ -149,7 +214,6 @@ async def require_admin(user: dict = Depends(get_current_user)):
     return user
 
 # ==================== SYSTEM COMMANDS ====================
-# These are MOCKED for the dev environment. On real Pi, set SIMULATION_MODE=false
 
 SIMULATION_MODE = os.environ.get('SIMULATION_MODE', 'true').lower() == 'true'
 
@@ -232,14 +296,12 @@ def apply_port_rule(rule: dict, enable: bool) -> dict:
     
     for proto in protocols:
         if enable:
-            # Add rules
             success, msg = add_iptables_rule(rule['external_port'], rule['internal_port'], proto)
             results['iptables'].append({"protocol": proto, "success": success, "message": msg})
             
             success, msg = add_ufw_rule(rule['external_port'], proto)
             results['ufw'].append({"protocol": proto, "success": success, "message": msg})
         else:
-            # Remove rules
             success, msg = remove_iptables_rule(rule['external_port'], rule['internal_port'], proto)
             results['iptables'].append({"protocol": proto, "success": success, "message": msg})
             
@@ -253,50 +315,59 @@ def apply_port_rule(rule: dict, enable: bool) -> dict:
 @app.on_event("startup")
 async def startup_event():
     """Initialize database and default admin user"""
-    # Create indexes
-    await db.users.create_index("username", unique=True)
-    await db.users.create_index("id", unique=True)
-    await db.port_rules.create_index("id", unique=True)
-    await db.port_rules.create_index("external_port")
+    init_database()
     
-    # Check if admin user exists
-    admin = await db.users.find_one({"username": "admin"})
-    if not admin:
-        admin_user = {
-            "id": str(uuid.uuid4()),
-            "username": "admin",
-            "password_hash": hash_password("admin"),
-            "role": "admin",
-            "must_change_password": True,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "last_login": None
-        }
-        await db.users.insert_one(admin_user)
-        logger.info("Default admin user created (username: admin, password: admin)")
-    
-    # Apply all enabled port rules on startup
-    enabled_rules = await db.port_rules.find({"enabled": True}, {"_id": 0}).to_list(1000)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Check if admin user exists
+        cursor.execute("SELECT * FROM users WHERE username = ?", ("admin",))
+        admin = cursor.fetchone()
+        
+        if not admin:
+            admin_id = str(uuid.uuid4())
+            cursor.execute('''
+                INSERT INTO users (id, username, password_hash, role, must_change_password, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                admin_id,
+                "admin",
+                hash_password("admin"),
+                "admin",
+                1,
+                datetime.now(timezone.utc).isoformat()
+            ))
+            logger.info("Default admin user created (username: admin, password: admin)")
+        
+        # Apply all enabled port rules on startup
+        cursor.execute("SELECT * FROM port_rules WHERE enabled = 1")
+        enabled_rules = [dict_from_row(row) for row in cursor.fetchall()]
+        
     for rule in enabled_rules:
+        rule['enabled'] = bool(rule['enabled'])
+        rule['is_outside_safe_range'] = bool(rule['is_outside_safe_range'])
         logger.info(f"Applying rule on startup: {rule['name']} (port {rule['external_port']})")
         apply_port_rule(rule, True)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
 
 # ==================== AUTH ROUTES ====================
 
 @api_router.post("/auth/login", response_model=TokenResponse)
 async def login(credentials: UserLogin):
-    user = await db.users.find_one({"username": credentials.username}, {"_id": 0})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM users WHERE username = ?", (credentials.username,))
+        user = dict_from_row(cursor.fetchone())
+    
     if not user or not verify_password(credentials.password, user['password_hash']):
         raise HTTPException(status_code=401, detail="Invalid username or password")
     
     # Update last login
-    await db.users.update_one(
-        {"id": user['id']},
-        {"$set": {"last_login": datetime.now(timezone.utc).isoformat()}}
-    )
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET last_login = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), user['id'])
+        )
     
     token = create_token(user['id'], user['username'], user['role'])
     
@@ -306,7 +377,7 @@ async def login(credentials: UserLogin):
             id=user['id'],
             username=user['username'],
             role=user['role'],
-            must_change_password=user['must_change_password'],
+            must_change_password=bool(user['must_change_password']),
             created_at=user['created_at'],
             last_login=user.get('last_login')
         )
@@ -318,10 +389,12 @@ async def change_password(data: PasswordChange, user: dict = Depends(get_current
         raise HTTPException(status_code=400, detail="Current password is incorrect")
     
     new_hash = hash_password(data.new_password)
-    await db.users.update_one(
-        {"id": user['id']},
-        {"$set": {"password_hash": new_hash, "must_change_password": False}}
-    )
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
+            (new_hash, user['id'])
+        )
     
     return {"message": "Password changed successfully"}
 
@@ -331,7 +404,7 @@ async def get_current_user_info(user: dict = Depends(get_current_user)):
         id=user['id'],
         username=user['username'],
         role=user['role'],
-        must_change_password=user['must_change_password'],
+        must_change_password=bool(user['must_change_password']),
         created_at=user['created_at'],
         last_login=user.get('last_login')
     )
@@ -340,44 +413,64 @@ async def get_current_user_info(user: dict = Depends(get_current_user)):
 
 @api_router.post("/users", response_model=UserResponse)
 async def create_user(data: UserCreate, admin: dict = Depends(require_admin)):
-    # Check if username exists
-    existing = await db.users.find_one({"username": data.username})
-    if existing:
-        raise HTTPException(status_code=400, detail="Username already exists")
-    
-    new_user = {
-        "id": str(uuid.uuid4()),
-        "username": data.username,
-        "password_hash": hash_password(data.password),
-        "role": data.role,
-        "must_change_password": True,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "last_login": None
-    }
-    await db.users.insert_one(new_user)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Check if username exists
+        cursor.execute("SELECT id FROM users WHERE username = ?", (data.username,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail="Username already exists")
+        
+        new_id = str(uuid.uuid4())
+        created_at = datetime.now(timezone.utc).isoformat()
+        
+        cursor.execute('''
+            INSERT INTO users (id, username, password_hash, role, must_change_password, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            new_id,
+            data.username,
+            hash_password(data.password),
+            data.role,
+            1,
+            created_at
+        ))
     
     return UserResponse(
-        id=new_user['id'],
-        username=new_user['username'],
-        role=new_user['role'],
-        must_change_password=new_user['must_change_password'],
-        created_at=new_user['created_at'],
+        id=new_id,
+        username=data.username,
+        role=data.role,
+        must_change_password=True,
+        created_at=created_at,
         last_login=None
     )
 
 @api_router.get("/users", response_model=List[UserResponse])
 async def list_users(admin: dict = Depends(require_admin)):
-    users = await db.users.find({}, {"_id": 0, "password_hash": 0}).to_list(1000)
-    return [UserResponse(**u) for u in users]
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, username, role, must_change_password, created_at, last_login FROM users")
+        users = [dict_from_row(row) for row in cursor.fetchall()]
+    
+    return [UserResponse(
+        id=u['id'],
+        username=u['username'],
+        role=u['role'],
+        must_change_password=bool(u['must_change_password']),
+        created_at=u['created_at'],
+        last_login=u.get('last_login')
+    ) for u in users]
 
 @api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
     if admin['id'] == user_id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
     
-    result = await db.users.delete_one({"id": user_id})
-    if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="User not found")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User not found")
     
     return {"message": "User deleted successfully"}
 
@@ -385,88 +478,194 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
 
 @api_router.post("/rules", response_model=PortRuleResponse)
 async def create_port_rule(data: PortRuleCreate, user: dict = Depends(get_current_user)):
-    # Check if port already exists
-    existing = await db.port_rules.find_one({"external_port": data.external_port})
-    if existing:
-        raise HTTPException(status_code=400, detail=f"Port {data.external_port} is already configured")
-    
     is_outside_range = data.external_port < SAFE_PORT_MIN or data.external_port > SAFE_PORT_MAX
     
-    new_rule = {
-        "id": str(uuid.uuid4()),
-        "name": data.name,
-        "external_port": data.external_port,
-        "internal_port": data.internal_port,
-        "protocol": data.protocol,
-        "description": data.description or "",
-        "enabled": False,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "created_by": user['username'],
-        "is_outside_safe_range": is_outside_range
-    }
-    await db.port_rules.insert_one(new_rule)
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Check if port already exists
+        cursor.execute("SELECT id FROM port_rules WHERE external_port = ?", (data.external_port,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=400, detail=f"Port {data.external_port} is already configured")
+        
+        new_id = str(uuid.uuid4())
+        created_at = datetime.now(timezone.utc).isoformat()
+        
+        cursor.execute('''
+            INSERT INTO port_rules (id, name, external_port, internal_port, protocol, description, enabled, created_at, created_by, is_outside_safe_range)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            new_id,
+            data.name,
+            data.external_port,
+            data.internal_port,
+            data.protocol,
+            data.description or "",
+            0,
+            created_at,
+            user['username'],
+            1 if is_outside_range else 0
+        ))
     
-    return PortRuleResponse(**new_rule)
+    return PortRuleResponse(
+        id=new_id,
+        name=data.name,
+        external_port=data.external_port,
+        internal_port=data.internal_port,
+        protocol=data.protocol,
+        description=data.description or "",
+        enabled=False,
+        created_at=created_at,
+        created_by=user['username'],
+        is_outside_safe_range=is_outside_range
+    )
 
 @api_router.get("/rules", response_model=List[PortRuleResponse])
 async def list_port_rules(user: dict = Depends(get_current_user)):
-    rules = await db.port_rules.find({}, {"_id": 0}).to_list(1000)
-    return [PortRuleResponse(**r) for r in rules]
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM port_rules")
+        rules = [dict_from_row(row) for row in cursor.fetchall()]
+    
+    return [PortRuleResponse(
+        id=r['id'],
+        name=r['name'],
+        external_port=r['external_port'],
+        internal_port=r['internal_port'],
+        protocol=r['protocol'],
+        description=r['description'],
+        enabled=bool(r['enabled']),
+        created_at=r['created_at'],
+        created_by=r['created_by'],
+        is_outside_safe_range=bool(r['is_outside_safe_range'])
+    ) for r in rules]
 
 @api_router.get("/rules/{rule_id}", response_model=PortRuleResponse)
 async def get_port_rule(rule_id: str, user: dict = Depends(get_current_user)):
-    rule = await db.port_rules.find_one({"id": rule_id}, {"_id": 0})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM port_rules WHERE id = ?", (rule_id,))
+        rule = dict_from_row(cursor.fetchone())
+    
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
-    return PortRuleResponse(**rule)
+    
+    return PortRuleResponse(
+        id=rule['id'],
+        name=rule['name'],
+        external_port=rule['external_port'],
+        internal_port=rule['internal_port'],
+        protocol=rule['protocol'],
+        description=rule['description'],
+        enabled=bool(rule['enabled']),
+        created_at=rule['created_at'],
+        created_by=rule['created_by'],
+        is_outside_safe_range=bool(rule['is_outside_safe_range'])
+    )
 
 @api_router.put("/rules/{rule_id}", response_model=PortRuleResponse)
 async def update_port_rule(rule_id: str, data: PortRuleUpdate, user: dict = Depends(get_current_user)):
-    rule = await db.port_rules.find_one({"id": rule_id}, {"_id": 0})
-    if not rule:
-        raise HTTPException(status_code=404, detail="Rule not found")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM port_rules WHERE id = ?", (rule_id,))
+        rule = dict_from_row(cursor.fetchone())
+        
+        if not rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        
+        # Build update query dynamically
+        updates = []
+        values = []
+        
+        if data.name is not None:
+            updates.append("name = ?")
+            values.append(data.name)
+        
+        if data.external_port is not None:
+            # Check for conflicts
+            cursor.execute("SELECT id FROM port_rules WHERE external_port = ? AND id != ?", (data.external_port, rule_id))
+            if cursor.fetchone():
+                raise HTTPException(status_code=400, detail=f"Port {data.external_port} is already configured")
+            updates.append("external_port = ?")
+            values.append(data.external_port)
+            updates.append("is_outside_safe_range = ?")
+            values.append(1 if (data.external_port < SAFE_PORT_MIN or data.external_port > SAFE_PORT_MAX) else 0)
+        
+        if data.internal_port is not None:
+            updates.append("internal_port = ?")
+            values.append(data.internal_port)
+        
+        if data.protocol is not None:
+            updates.append("protocol = ?")
+            values.append(data.protocol)
+        
+        if data.description is not None:
+            updates.append("description = ?")
+            values.append(data.description)
+        
+        if data.enabled is not None:
+            updates.append("enabled = ?")
+            values.append(1 if data.enabled else 0)
+        
+        if updates:
+            values.append(rule_id)
+            cursor.execute(f"UPDATE port_rules SET {', '.join(updates)} WHERE id = ?", values)
+        
+        cursor.execute("SELECT * FROM port_rules WHERE id = ?", (rule_id,))
+        updated_rule = dict_from_row(cursor.fetchone())
     
-    update_data = {k: v for k, v in data.model_dump().items() if v is not None}
-    
-    # Check if external port is being changed and if new port conflicts
-    if 'external_port' in update_data and update_data['external_port'] != rule['external_port']:
-        existing = await db.port_rules.find_one({"external_port": update_data['external_port']})
-        if existing:
-            raise HTTPException(status_code=400, detail=f"Port {update_data['external_port']} is already configured")
-        update_data['is_outside_safe_range'] = update_data['external_port'] < SAFE_PORT_MIN or update_data['external_port'] > SAFE_PORT_MAX
-    
-    if update_data:
-        await db.port_rules.update_one({"id": rule_id}, {"$set": update_data})
-    
-    updated_rule = await db.port_rules.find_one({"id": rule_id}, {"_id": 0})
-    return PortRuleResponse(**updated_rule)
+    return PortRuleResponse(
+        id=updated_rule['id'],
+        name=updated_rule['name'],
+        external_port=updated_rule['external_port'],
+        internal_port=updated_rule['internal_port'],
+        protocol=updated_rule['protocol'],
+        description=updated_rule['description'],
+        enabled=bool(updated_rule['enabled']),
+        created_at=updated_rule['created_at'],
+        created_by=updated_rule['created_by'],
+        is_outside_safe_range=bool(updated_rule['is_outside_safe_range'])
+    )
 
 @api_router.delete("/rules/{rule_id}")
 async def delete_port_rule(rule_id: str, user: dict = Depends(get_current_user)):
-    rule = await db.port_rules.find_one({"id": rule_id}, {"_id": 0})
-    if not rule:
-        raise HTTPException(status_code=404, detail="Rule not found")
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM port_rules WHERE id = ?", (rule_id,))
+        rule = dict_from_row(cursor.fetchone())
+        
+        if not rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        
+        # Remove firewall rules if enabled
+        if rule['enabled']:
+            rule['enabled'] = bool(rule['enabled'])
+            rule['is_outside_safe_range'] = bool(rule['is_outside_safe_range'])
+            apply_port_rule(rule, False)
+        
+        cursor.execute("DELETE FROM port_rules WHERE id = ?", (rule_id,))
     
-    # Remove firewall rules if enabled
-    if rule['enabled']:
-        apply_port_rule(rule, False)
-    
-    await db.port_rules.delete_one({"id": rule_id})
     return {"message": "Rule deleted successfully"}
 
 @api_router.post("/rules/{rule_id}/toggle")
 async def toggle_port_rule(rule_id: str, user: dict = Depends(get_current_user)):
-    rule = await db.port_rules.find_one({"id": rule_id}, {"_id": 0})
-    if not rule:
-        raise HTTPException(status_code=404, detail="Rule not found")
-    
-    new_state = not rule['enabled']
-    
-    # Apply or remove firewall rules
-    results = apply_port_rule(rule, new_state)
-    
-    # Update database
-    await db.port_rules.update_one({"id": rule_id}, {"$set": {"enabled": new_state}})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM port_rules WHERE id = ?", (rule_id,))
+        rule = dict_from_row(cursor.fetchone())
+        
+        if not rule:
+            raise HTTPException(status_code=404, detail="Rule not found")
+        
+        rule['enabled'] = bool(rule['enabled'])
+        rule['is_outside_safe_range'] = bool(rule['is_outside_safe_range'])
+        new_state = not rule['enabled']
+        
+        # Apply or remove firewall rules
+        results = apply_port_rule(rule, new_state)
+        
+        # Update database
+        cursor.execute("UPDATE port_rules SET enabled = ? WHERE id = ?", (1 if new_state else 0, rule_id))
     
     return {
         "enabled": new_state,
@@ -478,7 +677,6 @@ async def toggle_port_rule(rule_id: str, user: dict = Depends(get_current_user))
 
 @api_router.get("/system/status", response_model=SystemStatus)
 async def get_system_status(user: dict = Depends(get_current_user)):
-    # Check if iptables is available
     iptables_ok, _ = run_command(['which', 'iptables']) if not SIMULATION_MODE else (True, "simulated")
     ufw_ok, _ = run_command(['which', 'ufw']) if not SIMULATION_MODE else (True, "simulated")
     
@@ -492,9 +690,16 @@ async def get_system_status(user: dict = Depends(get_current_user)):
 
 @api_router.get("/system/stats")
 async def get_system_stats(user: dict = Depends(get_current_user)):
-    total_rules = await db.port_rules.count_documents({})
-    active_rules = await db.port_rules.count_documents({"enabled": True})
-    total_users = await db.users.count_documents({})
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) as count FROM port_rules")
+        total_rules = cursor.fetchone()['count']
+        
+        cursor.execute("SELECT COUNT(*) as count FROM port_rules WHERE enabled = 1")
+        active_rules = cursor.fetchone()['count']
+        
+        cursor.execute("SELECT COUNT(*) as count FROM users")
+        total_users = cursor.fetchone()['count']
     
     return {
         "total_rules": total_rules,

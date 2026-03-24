@@ -1,11 +1,13 @@
 #!/bin/bash
 # Port Forward Manager - Installation Script for Raspberry Pi
+# Now uses SQLite (no MongoDB required!)
 # Run this script as root on your Raspberry Pi
 
 set -e
 
 echo "=========================================="
 echo "  Port Forward Manager - Installation"
+echo "  (SQLite Version - No MongoDB Required)"
 echo "=========================================="
 echo ""
 
@@ -19,15 +21,13 @@ fi
 APP_DIR="/opt/port-forward-manager"
 SERVICE_NAME="port-forward-manager"
 WEB_PORT="${WEB_PORT:-5005}"
-MONGO_URL="${MONGO_URL:-mongodb://localhost:27017}"
-DB_NAME="${DB_NAME:-port_forward_manager}"
 WIREGUARD_INTERFACE="${WIREGUARD_INTERFACE:-wg0}"
 WIREGUARD_DEST_IP="${WIREGUARD_DEST_IP:-10.0.0.2}"
 
 echo "Configuration:"
 echo "  - App Directory: $APP_DIR"
 echo "  - Web Port: $WEB_PORT"
-echo "  - MongoDB URL: $MONGO_URL"
+echo "  - Database: SQLite (file-based, no external service)"
 echo "  - WireGuard Interface: $WIREGUARD_INTERFACE"
 echo "  - WireGuard Destination: $WIREGUARD_DEST_IP"
 echo ""
@@ -40,18 +40,6 @@ if ! command -v python3 &> /dev/null; then
     echo "Installing Python 3..."
     apt-get update
     apt-get install -y python3 python3-pip python3-venv
-fi
-
-# Check for MongoDB
-if ! command -v mongod &> /dev/null; then
-    echo "WARNING: MongoDB is not installed. Please install MongoDB first."
-    echo "  Run: sudo apt-get install -y mongodb"
-    echo "  Or install MongoDB manually from https://www.mongodb.com"
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
 fi
 
 # Check for iptables
@@ -70,7 +58,6 @@ fi
 echo "Creating application directory..."
 mkdir -p "$APP_DIR"
 mkdir -p "$APP_DIR/backend"
-mkdir -p "$APP_DIR/frontend/build"
 
 # Copy backend files
 echo "Setting up backend..."
@@ -78,11 +65,9 @@ cat > "$APP_DIR/backend/requirements.txt" << 'EOF'
 fastapi==0.110.1
 uvicorn==0.25.0
 python-dotenv>=1.0.1
-pymongo==4.5.0
 pydantic>=2.6.4
 pyjwt>=2.10.1
 bcrypt==4.1.3
-motor==3.3.1
 EOF
 
 # Create virtual environment
@@ -96,8 +81,7 @@ deactivate
 # Create .env file
 echo "Creating environment configuration..."
 cat > "$APP_DIR/backend/.env" << EOF
-MONGO_URL="$MONGO_URL"
-DB_NAME="$DB_NAME"
+DB_PATH="$APP_DIR/port_forward.db"
 CORS_ORIGINS="*"
 JWT_SECRET="$(openssl rand -hex 32)"
 WIREGUARD_INTERFACE="$WIREGUARD_INTERFACE"
@@ -105,16 +89,16 @@ WIREGUARD_DEST_IP="$WIREGUARD_DEST_IP"
 SIMULATION_MODE="false"
 EOF
 
+echo ""
 echo "IMPORTANT: Copy your server.py to $APP_DIR/backend/server.py"
-echo "IMPORTANT: Copy your frontend build to $APP_DIR/frontend/build/"
+echo ""
 
 # Create systemd service
 echo "Creating systemd service..."
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
 Description=Port Forward Manager
-After=network.target mongodb.service
-Wants=mongodb.service
+After=network.target
 
 [Service]
 Type=simple
@@ -149,13 +133,18 @@ echo "  Installation Complete!"
 echo "=========================================="
 echo ""
 echo "Next steps:"
-echo "1. Copy your server.py to: $APP_DIR/backend/server.py"
-echo "2. Copy your frontend build to: $APP_DIR/frontend/build/"
-echo "3. Start the service:"
+echo ""
+echo "1. Copy your server.py to the Pi:"
+echo "   scp server.py pi@<your-pi-ip>:$APP_DIR/backend/"
+echo ""
+echo "2. Start the service:"
 echo "   sudo systemctl start $SERVICE_NAME"
-echo "4. Enable on boot:"
+echo ""
+echo "3. Enable on boot:"
 echo "   sudo systemctl enable $SERVICE_NAME"
-echo "5. Access the web UI at: http://<pi-ip>:$WEB_PORT"
+echo ""
+echo "4. Access the web UI at:"
+echo "   http://<pi-ip>:$WEB_PORT"
 echo ""
 echo "Default credentials: admin / admin"
 echo "(You will be prompted to change password on first login)"
@@ -165,4 +154,7 @@ echo "   sudo systemctl status $SERVICE_NAME"
 echo ""
 echo "To view logs:"
 echo "   sudo journalctl -u $SERVICE_NAME -f"
+echo ""
+echo "Database location: $APP_DIR/port_forward.db"
+echo "(SQLite file - no external database service needed)"
 echo ""
