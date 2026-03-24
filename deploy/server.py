@@ -35,6 +35,7 @@ JWT_EXPIRATION_HOURS = 24
 # WireGuard Configuration
 WIREGUARD_INTERFACE = os.environ.get('WIREGUARD_INTERFACE', 'wg0')
 WIREGUARD_DEST_IP = os.environ.get('WIREGUARD_DEST_IP', '10.0.0.2')
+WIREGUARD_DOCKER_CONTAINER = os.environ.get('WIREGUARD_DOCKER_CONTAINER', '')  # Set to container name if WG runs in Docker
 SAFE_PORT_MIN = 60000
 SAFE_PORT_MAX = 61000
 
@@ -832,28 +833,55 @@ async def get_wireguard_status(user: dict = Depends(get_current_user)):
             "last_handshake_timestamp": None,
             "transfer_rx": "1.5 GiB",
             "transfer_tx": "500 MiB",
-            "simulation_mode": True
+            "simulation_mode": True,
+            "docker_container": WIREGUARD_DOCKER_CONTAINER or None
         }
     
-    # Check if interface exists
-    success, output = run_command(['ip', 'link', 'show', WIREGUARD_INTERFACE])
-    if not success:
-        return {
-            "status": "down",
-            "interface": WIREGUARD_INTERFACE,
-            "error": "Interface not found",
-            "simulation_mode": False
-        }
-    
-    # Get WireGuard status
-    success, output = run_command(['wg', 'show', WIREGUARD_INTERFACE])
-    if not success:
-        return {
-            "status": "down",
-            "interface": WIREGUARD_INTERFACE,
-            "error": output,
-            "simulation_mode": False
-        }
+    # Check if WireGuard is running in Docker
+    if WIREGUARD_DOCKER_CONTAINER:
+        # Check if Docker container is running
+        success, output = run_command(['docker', 'inspect', '-f', '{{.State.Running}}', WIREGUARD_DOCKER_CONTAINER])
+        if not success or 'true' not in output.lower():
+            return {
+                "status": "down",
+                "interface": WIREGUARD_INTERFACE,
+                "error": f"Docker container '{WIREGUARD_DOCKER_CONTAINER}' is not running",
+                "simulation_mode": False,
+                "docker_container": WIREGUARD_DOCKER_CONTAINER
+            }
+        
+        # Get WireGuard status from inside the Docker container
+        success, output = run_command(['docker', 'exec', WIREGUARD_DOCKER_CONTAINER, 'wg', 'show', WIREGUARD_INTERFACE])
+        if not success:
+            return {
+                "status": "down",
+                "interface": WIREGUARD_INTERFACE,
+                "error": output,
+                "simulation_mode": False,
+                "docker_container": WIREGUARD_DOCKER_CONTAINER
+            }
+    else:
+        # WireGuard running on host - check if interface exists
+        success, output = run_command(['ip', 'link', 'show', WIREGUARD_INTERFACE])
+        if not success:
+            return {
+                "status": "down",
+                "interface": WIREGUARD_INTERFACE,
+                "error": "Interface not found",
+                "simulation_mode": False,
+                "docker_container": None
+            }
+        
+        # Get WireGuard status from host
+        success, output = run_command(['wg', 'show', WIREGUARD_INTERFACE])
+        if not success:
+            return {
+                "status": "down",
+                "interface": WIREGUARD_INTERFACE,
+                "error": output,
+                "simulation_mode": False,
+                "docker_container": None
+            }
     
     # Parse the wg show output
     result = {
@@ -865,7 +893,8 @@ async def get_wireguard_status(user: dict = Depends(get_current_user)):
         "last_handshake_timestamp": None,
         "transfer_rx": None,
         "transfer_tx": None,
-        "simulation_mode": False
+        "simulation_mode": False,
+        "docker_container": WIREGUARD_DOCKER_CONTAINER or None
     }
     
     lines = output.strip().split('\n')
