@@ -1,0 +1,82 @@
+{
+  "theme": "Dark",
+  "typography": {
+    "headings": "IBM Plex Sans",
+    "body": "IBM Plex Sans",
+    "monospace": "JetBrains Mono"
+  },
+  "colors": {
+    "background": "#09090B",
+    "card": "#121214",
+    "primary": "#3B82F6",
+    "accent": "#06B6D4",
+    "success": "#10B981",
+    "danger": "#EF4444",
+    "border": "#27272A",
+    "text_primary": "#F8FAFC",
+    "text_secondary": "#94A3B8"
+  },
+  "visual_enhancers": {
+    "surfaces": "Grid Borders and Technical look. Flat solid colors, no full-screen gradients. Subtle grid patterns on background for a network topology feel.",
+    "borders": "1px sharp borders, border-white/10 for grids and panels.",
+    "corners": "Minimal border radius, use 'rounded-sm' or square for a rigorous technical feel.",
+    "effects": "Subtle glow on active states (e.g. drop-shadow-[0_0_8px_rgba(59,130,246,0.5)]) to simulate LED indicators."
+  },
+  "components_strategy": {
+    "buttons": "Sharp rectangular. Primary button uses Blue with white text.",
+    "cards": "Cardless or 'Grid Borders' layout. No heavy shadows. Flat solid.",
+    "tables": "Dense, compact spacing. Monospace font for IPs, MAC addresses, and Ports to ensure strict alignment.",
+    "forms": "Use Shadcn Input, Select, Switch. Labeled clearly. Required fields indicated.",
+    "status_indicators": "Pulsing green dot (bg-emerald-500 animate-pulse) for active tunnels/rules. Solid red dot for inactive."
+  },
+  "layouts": {
+    "spacing": "Generous external padding (p-6, p-8), compact internal density for data tables.",
+    "structure": "Sidebar navigation (collapsible F-pattern) with main content split. Top summary KPI widgets.",
+    "grid": "Bento Grid high density for dashboard widgets."
+  },
+  "motion": {
+    "hover": "Subtle background shift (bg-zinc-900), text brightens.",
+    "transitions": "transition-colors duration-200 ease-in-out on interactive elements.",
+    "loaders": "Linear progress bars or monospace spinner (e.g. ASCII characters)."
+  },
+  "image_urls": [
+    {
+      "url": "https://images.unsplash.com/photo-1759159347934-1cdc38dd1f3e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDN8MHwxfHNlYXJjaHwzfHxzZXJ2ZXIlMjByYWNrJTIwZGFyayUyMGJsdWV8ZW58MHx8fHwxNzc0MzcyNjE1fDA&ixlib=rb-4.1.0&q=85",
+      "description": "Abstract pattern of dark squares on blue background",
+      "category": "Login Background"
+    },
+    {
+      "url": "https://images.unsplash.com/photo-1763771787035-99c6c28ec78e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2NDN8MHwxfHNlYXJjaHw0fHxzZXJ2ZXIlMjByYWNrJTIwZGFyayUyMGJsdWV8ZW58MHx8fHwxNzc0MzcyNjE1fDA&ixlib=rb-4.1.0&q=85",
+      "description": "Rows of metal bars illuminated with blue light",
+      "category": "Hero / Branding Accent"
+    }
+  ],
+  "accessibility": {
+    "contrast": "Ensure text contrast on dark backgrounds. Use text-white for primary, text-zinc-400 for secondary.",
+    "focus": "Clear focus rings (focus:ring-2 focus:ring-blue-500 focus:outline-none).",
+    "testing": "All interactive elements MUST use data-testid attributes."
+  },
+  "instructions_to_main_agent": [
+    "Ensure dark theme is the default and only theme. No light theme toggle needed unless requested.",
+    "Update index.css to map tailwind variables (like --primary) to the blue theme.",
+    "Update tailwind.config.js to include 'IBM Plex Sans' and 'JetBrains Mono' fonts.",
+    "Set the UI to run on port 5005 as requested by the user. Modify vite.config.js to set server port to 5005.",
+    "Use Phosphor icons or Lucide React for network/admin symbols (Server, Activity, Shield, Network).",
+    "Build Shadcn Data Table with sorting/filtering for port forwarding rules.",
+    "For the IP and Ports columns in the table, ALWAYS use the JetBrains Mono monospace font.",
+    "No purple gradients. Stick to dark backgrounds with blue accents.",
+    "Create a clean Dashboard showing: Active Rules KPI, Connections KPI, and the Rules Table with a Toggle Switch for each rule.",
+    "Implement Sonner for toast messages on rule update success/failure."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "You have .js and .jsx files, not .tsx files. Share the guideline and implement components in JS.",
+    "Do not converge toward generic outputs. Use the specified fonts and styling to create a distinct 'tech/terminal' feel.",
+    "Do not apply `transition: all`. Use specific transitions.",
+    "Do not use `text-align: center` on the main app container.",
+    "No AI emojis for icons. Use the specified icon library.",
+    "Add micro-animations for hover states on table rows and buttons.",
+    "Create depth through layered design elements with z-index hierarchy, using 1px borders instead of heavy drop shadows.",
+    "Prioritize Shadcn components. Export correctly (named for components, default for pages).",
+    "Never use transparent backgrounds without a blur or scrim in header/overlays where content is underneath."
+  ]
+}
