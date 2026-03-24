@@ -23,6 +23,7 @@ SERVICE_NAME="port-forward-manager"
 WEB_PORT="${WEB_PORT:-5005}"
 WIREGUARD_INTERFACE="${WIREGUARD_INTERFACE:-wg0}"
 WIREGUARD_DEST_IP="${WIREGUARD_DEST_IP:-10.0.0.2}"
+PUBLIC_INTERFACE="${PUBLIC_INTERFACE:-eth0}"
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -33,6 +34,7 @@ echo "  - Web Port: $WEB_PORT"
 echo "  - Database: SQLite (file-based, no external service)"
 echo "  - WireGuard Interface: $WIREGUARD_INTERFACE"
 echo "  - WireGuard Destination: $WIREGUARD_DEST_IP"
+echo "  - Public Interface: $PUBLIC_INTERFACE"
 echo "  - Source Directory: $SCRIPT_DIR"
 echo ""
 
@@ -114,6 +116,7 @@ CORS_ORIGINS="*"
 JWT_SECRET="$JWT_SECRET"
 WIREGUARD_INTERFACE="$WIREGUARD_INTERFACE"
 WIREGUARD_DEST_IP="$WIREGUARD_DEST_IP"
+PUBLIC_INTERFACE="$PUBLIC_INTERFACE"
 SIMULATION_MODE="false"
 EOF
 

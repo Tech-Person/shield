@@ -221,6 +221,7 @@ async def require_admin(user: dict = Depends(get_current_user)):
 # ==================== SYSTEM COMMANDS ====================
 
 SIMULATION_MODE = os.environ.get('SIMULATION_MODE', 'true').lower() == 'true'
+PUBLIC_INTERFACE = os.environ.get('PUBLIC_INTERFACE', 'eth0')  # The interface receiving public traffic
 
 def run_command(cmd: List[str]) -> tuple:
     """Execute a system command. Returns (success, output)"""
@@ -239,60 +240,155 @@ def run_command(cmd: List[str]) -> tuple:
         logger.error(f"Command exception: {e}")
         return False, str(e)
 
-def check_iptables_rule_exists(external_port: int, protocol: str) -> bool:
-    """Check if an iptables NAT rule already exists"""
+def check_iptables_nat_rule_exists(external_port: int, internal_port: int, protocol: str) -> bool:
+    """Check if an iptables NAT PREROUTING rule already exists"""
+    if SIMULATION_MODE:
+        return False
+    
+    # Check for the DNAT rule
+    success, output = run_command([
+        'iptables', '-t', 'nat', '-C', 'PREROUTING',
+        '-i', PUBLIC_INTERFACE, '-p', protocol,
+        '--dport', str(external_port),
+        '-j', 'DNAT', '--to-destination', f'{WIREGUARD_DEST_IP}:{internal_port}'
+    ])
+    return success
+
+def check_iptables_forward_rule_exists(internal_port: int, protocol: str) -> bool:
+    """Check if an iptables FORWARD rule already exists"""
     if SIMULATION_MODE:
         return False
     
     success, output = run_command([
-        'iptables', '-t', 'nat', '-C', 'PREROUTING',
-        '-p', protocol, '--dport', str(external_port),
-        '-j', 'DNAT', '--to-destination', f'{WIREGUARD_DEST_IP}:{external_port}'
+        'iptables', '-C', 'FORWARD',
+        '-i', PUBLIC_INTERFACE, '-o', WIREGUARD_INTERFACE,
+        '-p', protocol, '--dport', str(internal_port),
+        '-d', WIREGUARD_DEST_IP,
+        '-j', 'ACCEPT'
     ])
     return success
 
-def check_ufw_rule_exists(port: int, protocol: str) -> bool:
-    """Check if a UFW rule already exists"""
+def check_ufw_route_rule_exists(port: int, protocol: str) -> bool:
+    """Check if a UFW route rule already exists"""
     if SIMULATION_MODE:
         return False
     
-    success, output = run_command(['ufw', 'status', 'numbered'])
+    success, output = run_command(['ufw', 'status'])
     if success:
-        pattern = f"{port}/{protocol}"
+        # Look for route rules in the format: 10.0.0.2 60002/tcp on wg0 ALLOW FWD
+        pattern = f"{WIREGUARD_DEST_IP} {port}/{protocol}"
         return pattern.lower() in output.lower()
     return False
 
-def add_iptables_rule(external_port: int, internal_port: int, protocol: str) -> tuple:
-    """Add iptables NAT PREROUTING rule"""
-    if check_iptables_rule_exists(external_port, protocol):
-        return True, "Rule already exists"
+def add_iptables_rules(external_port: int, internal_port: int, protocol: str) -> tuple:
+    """Add iptables NAT PREROUTING and FORWARD rules for port forwarding"""
+    results = []
     
-    return run_command([
-        'iptables', '-t', 'nat', '-A', 'PREROUTING',
-        '-i', WIREGUARD_INTERFACE, '-p', protocol,
-        '--dport', str(external_port),
-        '-j', 'DNAT', '--to-destination', f'{WIREGUARD_DEST_IP}:{internal_port}'
+    # 1. Add PREROUTING DNAT rule (redirect incoming traffic to wireguard destination)
+    if not check_iptables_nat_rule_exists(external_port, internal_port, protocol):
+        success, msg = run_command([
+            'iptables', '-t', 'nat', '-A', 'PREROUTING',
+            '-i', PUBLIC_INTERFACE, '-p', protocol,
+            '--dport', str(external_port),
+            '-j', 'DNAT', '--to-destination', f'{WIREGUARD_DEST_IP}:{internal_port}'
+        ])
+        results.append(f"NAT PREROUTING: {msg if not success else 'added'}")
+    else:
+        results.append("NAT PREROUTING: already exists")
+    
+    # 2. Add FORWARD rule to allow the forwarded traffic
+    if not check_iptables_forward_rule_exists(internal_port, protocol):
+        success, msg = run_command([
+            'iptables', '-A', 'FORWARD',
+            '-i', PUBLIC_INTERFACE, '-o', WIREGUARD_INTERFACE,
+            '-p', protocol, '--dport', str(internal_port),
+            '-d', WIREGUARD_DEST_IP,
+            '-j', 'ACCEPT'
+        ])
+        results.append(f"FORWARD: {msg if not success else 'added'}")
+    else:
+        results.append("FORWARD: already exists")
+    
+    # 3. Add FORWARD rule for return traffic (ESTABLISHED,RELATED)
+    # This is usually handled by conntrack but let's be explicit
+    success, _ = run_command([
+        'iptables', '-C', 'FORWARD',
+        '-i', WIREGUARD_INTERFACE, '-o', PUBLIC_INTERFACE,
+        '-m', 'state', '--state', 'ESTABLISHED,RELATED',
+        '-j', 'ACCEPT'
     ])
+    if not success:
+        run_command([
+            'iptables', '-A', 'FORWARD',
+            '-i', WIREGUARD_INTERFACE, '-o', PUBLIC_INTERFACE,
+            '-m', 'state', '--state', 'ESTABLISHED,RELATED',
+            '-j', 'ACCEPT'
+        ])
+        results.append("FORWARD return: added")
+    
+    return True, "; ".join(results)
 
-def remove_iptables_rule(external_port: int, internal_port: int, protocol: str) -> tuple:
-    """Remove iptables NAT PREROUTING rule"""
-    return run_command([
+def remove_iptables_rules(external_port: int, internal_port: int, protocol: str) -> tuple:
+    """Remove iptables NAT PREROUTING and FORWARD rules"""
+    results = []
+    
+    # Remove PREROUTING DNAT rule
+    success, msg = run_command([
         'iptables', '-t', 'nat', '-D', 'PREROUTING',
-        '-i', WIREGUARD_INTERFACE, '-p', protocol,
+        '-i', PUBLIC_INTERFACE, '-p', protocol,
         '--dport', str(external_port),
         '-j', 'DNAT', '--to-destination', f'{WIREGUARD_DEST_IP}:{internal_port}'
     ])
-
-def add_ufw_rule(port: int, protocol: str) -> tuple:
-    """Add UFW allow rule"""
-    if check_ufw_rule_exists(port, protocol):
-        return True, "Rule already exists"
+    results.append(f"NAT PREROUTING: {'removed' if success else msg}")
     
-    return run_command(['ufw', 'allow', f'{port}/{protocol}'])
+    # Remove FORWARD rule
+    success, msg = run_command([
+        'iptables', '-D', 'FORWARD',
+        '-i', PUBLIC_INTERFACE, '-o', WIREGUARD_INTERFACE,
+        '-p', protocol, '--dport', str(internal_port),
+        '-d', WIREGUARD_DEST_IP,
+        '-j', 'ACCEPT'
+    ])
+    results.append(f"FORWARD: {'removed' if success else msg}")
+    
+    return True, "; ".join(results)
 
-def remove_ufw_rule(port: int, protocol: str) -> tuple:
-    """Remove UFW rule"""
-    return run_command(['ufw', 'delete', 'allow', f'{port}/{protocol}'])
+def add_ufw_rules(external_port: int, internal_port: int, protocol: str) -> tuple:
+    """Add UFW rules for port forwarding"""
+    results = []
+    
+    # 1. Allow incoming traffic on the external port
+    success, msg = run_command(['ufw', 'allow', f'{external_port}/{protocol}'])
+    results.append(f"allow {external_port}/{protocol}: {'ok' if success else msg}")
+    
+    # 2. Add route rule for forwarding (UFW's way of allowing forwarded traffic)
+    if not check_ufw_route_rule_exists(internal_port, protocol):
+        success, msg = run_command([
+            'ufw', 'route', 'allow', 'proto', protocol,
+            'from', 'any', 'to', WIREGUARD_DEST_IP, 'port', str(internal_port)
+        ])
+        results.append(f"route to {WIREGUARD_DEST_IP}:{internal_port}: {'ok' if success else msg}")
+    else:
+        results.append(f"route to {WIREGUARD_DEST_IP}:{internal_port}: already exists")
+    
+    return True, "; ".join(results)
+
+def remove_ufw_rules(external_port: int, internal_port: int, protocol: str) -> tuple:
+    """Remove UFW rules for port forwarding"""
+    results = []
+    
+    # Remove allow rule
+    success, msg = run_command(['ufw', 'delete', 'allow', f'{external_port}/{protocol}'])
+    results.append(f"delete allow {external_port}/{protocol}: {'ok' if success else msg}")
+    
+    # Remove route rule
+    success, msg = run_command([
+        'ufw', 'route', 'delete', 'allow', 'proto', protocol,
+        'from', 'any', 'to', WIREGUARD_DEST_IP, 'port', str(internal_port)
+    ])
+    results.append(f"delete route to {WIREGUARD_DEST_IP}:{internal_port}: {'ok' if success else msg}")
+    
+    return True, "; ".join(results)
 
 def apply_port_rule(rule: dict, enable: bool) -> dict:
     """Apply or remove all firewall rules for a port forwarding rule"""
@@ -301,16 +397,16 @@ def apply_port_rule(rule: dict, enable: bool) -> dict:
     
     for proto in protocols:
         if enable:
-            success, msg = add_iptables_rule(rule['external_port'], rule['internal_port'], proto)
+            success, msg = add_iptables_rules(rule['external_port'], rule['internal_port'], proto)
             results['iptables'].append({"protocol": proto, "success": success, "message": msg})
             
-            success, msg = add_ufw_rule(rule['external_port'], proto)
+            success, msg = add_ufw_rules(rule['external_port'], rule['internal_port'], proto)
             results['ufw'].append({"protocol": proto, "success": success, "message": msg})
         else:
-            success, msg = remove_iptables_rule(rule['external_port'], rule['internal_port'], proto)
+            success, msg = remove_iptables_rules(rule['external_port'], rule['internal_port'], proto)
             results['iptables'].append({"protocol": proto, "success": success, "message": msg})
             
-            success, msg = remove_ufw_rule(rule['external_port'], proto)
+            success, msg = remove_ufw_rules(rule['external_port'], rule['internal_port'], proto)
             results['ufw'].append({"protocol": proto, "success": success, "message": msg})
     
     return results
