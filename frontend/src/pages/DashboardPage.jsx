@@ -41,7 +41,11 @@ import {
   AlertTriangle,
   Trash2,
   Edit,
-  User
+  User,
+  Wifi,
+  WifiOff,
+  Clock,
+  RefreshCw
 } from 'lucide-react';
 import ChangePasswordDialog from '../components/ChangePasswordDialog';
 
@@ -54,6 +58,8 @@ export default function DashboardPage() {
   const [rules, setRules] = useState([]);
   const [stats, setStats] = useState({ total_rules: 0, active_rules: 0, inactive_rules: 0, total_users: 0 });
   const [systemStatus, setSystemStatus] = useState(null);
+  const [wireguardStatus, setWireguardStatus] = useState(null);
+  const [portRangeSettings, setPortRangeSettings] = useState({ safe_port_min: 60000, safe_port_max: 61000 });
   const [loading, setLoading] = useState(true);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
@@ -71,14 +77,16 @@ export default function DashboardPage() {
   const fetchData = useCallback(async () => {
     try {
       const headers = getAuthHeaders();
-      const [rulesRes, statsRes, statusRes] = await Promise.all([
+      const [rulesRes, statsRes, statusRes, portRangeRes] = await Promise.all([
         axios.get(`${API}/rules`, { headers }),
         axios.get(`${API}/system/stats`, { headers }),
-        axios.get(`${API}/system/status`, { headers })
+        axios.get(`${API}/system/status`, { headers }),
+        axios.get(`${API}/settings/port-range`, { headers })
       ]);
       setRules(rulesRes.data);
       setStats(statsRes.data);
       setSystemStatus(statusRes.data);
+      setPortRangeSettings(portRangeRes.data);
     } catch (error) {
       toast.error('Failed to fetch data');
     } finally {
@@ -86,9 +94,26 @@ export default function DashboardPage() {
     }
   }, [getAuthHeaders]);
 
+  const fetchWireguardStatus = useCallback(async () => {
+    try {
+      const headers = getAuthHeaders();
+      const response = await axios.get(`${API}/system/wireguard`, { headers });
+      setWireguardStatus(response.data);
+    } catch (error) {
+      console.error('Failed to fetch WireGuard status');
+    }
+  }, [getAuthHeaders]);
+
   useEffect(() => {
     fetchData();
-  }, [fetchData]);
+    fetchWireguardStatus();
+  }, [fetchData, fetchWireguardStatus]);
+
+  // Poll WireGuard status every 10 seconds
+  useEffect(() => {
+    const interval = setInterval(fetchWireguardStatus, 10000);
+    return () => clearInterval(interval);
+  }, [fetchWireguardStatus]);
 
   useEffect(() => {
     // Check if user must change password
@@ -203,7 +228,7 @@ export default function DashboardPage() {
 
   const isOutsideRange = (port) => {
     const p = parseInt(port);
-    return p < 60000 || p > 61000;
+    return p < portRangeSettings.safe_port_min || p > portRangeSettings.safe_port_max;
   };
 
   if (loading) {
@@ -318,25 +343,66 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* System Info */}
-        {systemStatus && (
-          <div className="card-tech p-4 mb-8">
+        {/* System Info with WireGuard Status */}
+        <div className="card-tech p-4 mb-8">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            {/* Left side - System Info */}
             <div className="flex flex-wrap items-center gap-6 text-sm">
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">WireGuard Interface:</span>
-                <span className="font-mono text-cyan-400">{systemStatus.wireguard_interface}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">Destination IP:</span>
-                <span className="font-mono text-cyan-400">{systemStatus.destination_ip}</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-muted-foreground">Safe Port Range:</span>
-                <span className="font-mono text-emerald-400">60000-61000</span>
-              </div>
+              {systemStatus && (
+                <>
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground">WireGuard Interface:</span>
+                    <span className="font-mono text-cyan-400">{systemStatus.wireguard_interface}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground">Destination IP:</span>
+                    <span className="font-mono text-cyan-400">{systemStatus.destination_ip}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-muted-foreground">Safe Port Range:</span>
+                    <span className="font-mono text-emerald-400">{portRangeSettings.safe_port_min}-{portRangeSettings.safe_port_max}</span>
+                  </div>
+                </>
+              )}
             </div>
+            
+            {/* Right side - WireGuard Status */}
+            {wireguardStatus && (
+              <div className="flex items-center gap-4 px-4 py-2 rounded-sm bg-zinc-900/50 border border-zinc-800">
+                <div className="flex items-center gap-2">
+                  {wireguardStatus.status === 'up' ? (
+                    <Wifi className="w-4 h-4 text-emerald-400" />
+                  ) : wireguardStatus.status === 'waiting' ? (
+                    <Wifi className="w-4 h-4 text-amber-400" />
+                  ) : (
+                    <WifiOff className="w-4 h-4 text-red-400" />
+                  )}
+                  <span className={`text-sm font-medium ${
+                    wireguardStatus.status === 'up' ? 'text-emerald-400' : 
+                    wireguardStatus.status === 'waiting' ? 'text-amber-400' : 'text-red-400'
+                  }`}>
+                    WG: {wireguardStatus.status.toUpperCase()}
+                  </span>
+                </div>
+                
+                {wireguardStatus.last_handshake && (
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Clock className="w-3 h-3" />
+                    <span className="font-mono text-xs">{wireguardStatus.last_handshake}</span>
+                  </div>
+                )}
+                
+                <button 
+                  onClick={fetchWireguardStatus}
+                  className="p-1 rounded hover:bg-zinc-800 transition-colors"
+                  title="Refresh status"
+                >
+                  <RefreshCw className="w-3 h-3 text-muted-foreground hover:text-white" />
+                </button>
+              </div>
+            )}
           </div>
-        )}
+        </div>
 
         {/* Rules Table */}
         <div className="card-tech">

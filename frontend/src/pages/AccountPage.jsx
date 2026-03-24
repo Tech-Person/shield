@@ -37,7 +37,9 @@ import {
   Key,
   Plus,
   Trash2,
-  Users
+  Users,
+  Settings,
+  Save
 } from 'lucide-react';
 import ChangePasswordDialog from '../components/ChangePasswordDialog';
 
@@ -58,6 +60,11 @@ export default function AccountPage() {
     password: '',
     role: 'user'
   });
+  const [portRangeSettings, setPortRangeSettings] = useState({
+    safe_port_min: 60000,
+    safe_port_max: 61000
+  });
+  const [isSavingPortRange, setIsSavingPortRange] = useState(false);
 
   const fetchUsers = useCallback(async () => {
     if (!isAdmin) {
@@ -77,9 +84,40 @@ export default function AccountPage() {
     }
   }, [isAdmin, getAuthHeaders]);
 
+  const fetchPortRangeSettings = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API}/settings/port-range`, {
+        headers: getAuthHeaders()
+      });
+      setPortRangeSettings(response.data);
+    } catch (error) {
+      console.error('Failed to fetch port range settings');
+    }
+  }, [getAuthHeaders]);
+
   useEffect(() => {
     fetchUsers();
-  }, [fetchUsers]);
+    fetchPortRangeSettings();
+  }, [fetchUsers, fetchPortRangeSettings]);
+
+  const handleSavePortRange = async () => {
+    if (portRangeSettings.safe_port_min >= portRangeSettings.safe_port_max) {
+      toast.error('Minimum port must be less than maximum port');
+      return;
+    }
+    
+    setIsSavingPortRange(true);
+    try {
+      await axios.put(`${API}/settings/port-range`, portRangeSettings, {
+        headers: getAuthHeaders()
+      });
+      toast.success('Port range settings saved');
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to save port range settings');
+    } finally {
+      setIsSavingPortRange(false);
+    }
+  };
 
   const handleAddUser = async (e) => {
     e.preventDefault();
@@ -202,6 +240,60 @@ export default function AccountPage() {
             </Button>
           </div>
         </div>
+
+        {/* Port Range Settings (Admin Only) */}
+        {isAdmin && (
+          <div className="card-tech p-6 mb-8">
+            <div className="flex items-center gap-2 mb-6">
+              <Settings className="w-5 h-5 text-blue-400" />
+              <h2 className="font-semibold text-white">Port Range Settings</h2>
+            </div>
+            
+            <p className="text-sm text-muted-foreground mb-4">
+              Define the safe port range for forwarding rules. Ports outside this range will show a warning.
+            </p>
+            
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="space-y-2">
+                <Label className="text-muted-foreground text-xs">Minimum Port</Label>
+                <Input
+                  type="number"
+                  value={portRangeSettings.safe_port_min}
+                  onChange={(e) => setPortRangeSettings(prev => ({ ...prev, safe_port_min: parseInt(e.target.value) || 0 }))}
+                  className="w-32 bg-zinc-900 border-zinc-700 text-white font-mono"
+                  min="1"
+                  max="65534"
+                  data-testid="port-range-min-input"
+                />
+              </div>
+              
+              <span className="text-muted-foreground pb-2">to</span>
+              
+              <div className="space-y-2">
+                <Label className="text-muted-foreground text-xs">Maximum Port</Label>
+                <Input
+                  type="number"
+                  value={portRangeSettings.safe_port_max}
+                  onChange={(e) => setPortRangeSettings(prev => ({ ...prev, safe_port_max: parseInt(e.target.value) || 0 }))}
+                  className="w-32 bg-zinc-900 border-zinc-700 text-white font-mono"
+                  min="2"
+                  max="65535"
+                  data-testid="port-range-max-input"
+                />
+              </div>
+              
+              <Button
+                onClick={handleSavePortRange}
+                disabled={isSavingPortRange}
+                className="bg-blue-600 hover:bg-blue-700 text-white"
+                data-testid="save-port-range-button"
+              >
+                <Save className="w-4 h-4 mr-2" />
+                {isSavingPortRange ? 'Saving...' : 'Save'}
+              </Button>
+            </div>
+          </div>
+        )}
 
         {/* User Management (Admin Only) */}
         {isAdmin && (

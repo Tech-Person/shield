@@ -100,6 +100,15 @@ def init_database():
             )
         ''')
         
+        # Create settings table
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+        
         # Create indexes
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_port_rules_external_port ON port_rules(external_port)')
@@ -807,6 +816,137 @@ async def get_system_stats(user: dict = Depends(get_current_user)):
         "active_rules": active_rules,
         "inactive_rules": total_rules - active_rules,
         "total_users": total_users
+    }
+
+@api_router.get("/system/wireguard")
+async def get_wireguard_status(user: dict = Depends(get_current_user)):
+    """Get WireGuard tunnel status including up/down state and last handshake"""
+    if SIMULATION_MODE:
+        # Return simulated data
+        return {
+            "status": "up",
+            "interface": WIREGUARD_INTERFACE,
+            "public_key": "SIMULATED_PUBLIC_KEY",
+            "endpoint": "simulated.endpoint:51820",
+            "last_handshake": "simulated - 45 seconds ago",
+            "last_handshake_timestamp": None,
+            "transfer_rx": "1.5 GiB",
+            "transfer_tx": "500 MiB",
+            "simulation_mode": True
+        }
+    
+    # Check if interface exists
+    success, output = run_command(['ip', 'link', 'show', WIREGUARD_INTERFACE])
+    if not success:
+        return {
+            "status": "down",
+            "interface": WIREGUARD_INTERFACE,
+            "error": "Interface not found",
+            "simulation_mode": False
+        }
+    
+    # Get WireGuard status
+    success, output = run_command(['wg', 'show', WIREGUARD_INTERFACE])
+    if not success:
+        return {
+            "status": "down",
+            "interface": WIREGUARD_INTERFACE,
+            "error": output,
+            "simulation_mode": False
+        }
+    
+    # Parse the wg show output
+    result = {
+        "status": "up",
+        "interface": WIREGUARD_INTERFACE,
+        "public_key": None,
+        "endpoint": None,
+        "last_handshake": None,
+        "last_handshake_timestamp": None,
+        "transfer_rx": None,
+        "transfer_tx": None,
+        "simulation_mode": False
+    }
+    
+    lines = output.strip().split('\n')
+    for line in lines:
+        line = line.strip()
+        if line.startswith('public key:'):
+            result['public_key'] = line.split(':', 1)[1].strip()
+        elif line.startswith('endpoint:'):
+            result['endpoint'] = line.split(':', 1)[1].strip()
+        elif line.startswith('latest handshake:'):
+            handshake = line.split(':', 1)[1].strip()
+            result['last_handshake'] = handshake
+            # If no handshake, tunnel might be down
+            if 'never' in handshake.lower():
+                result['status'] = 'waiting'
+        elif line.startswith('transfer:'):
+            transfer = line.split(':', 1)[1].strip()
+            parts = transfer.split(',')
+            if len(parts) >= 2:
+                result['transfer_rx'] = parts[0].strip().replace('received', '').strip()
+                result['transfer_tx'] = parts[1].strip().replace('sent', '').strip()
+    
+    return result
+
+# ==================== SETTINGS ROUTES ====================
+
+class PortRangeSettings(BaseModel):
+    safe_port_min: int
+    safe_port_max: int
+
+@api_router.get("/settings/port-range")
+async def get_port_range_settings(user: dict = Depends(get_current_user)):
+    """Get the current safe port range settings"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM settings WHERE key IN ('safe_port_min', 'safe_port_max')")
+        rows = cursor.fetchall()
+        
+        settings = {row['key']: int(row['value']) for row in rows}
+    
+    return {
+        "safe_port_min": settings.get('safe_port_min', SAFE_PORT_MIN),
+        "safe_port_max": settings.get('safe_port_max', SAFE_PORT_MAX)
+    }
+
+@api_router.put("/settings/port-range")
+async def update_port_range_settings(data: PortRangeSettings, admin: dict = Depends(require_admin)):
+    """Update the safe port range settings (admin only)"""
+    if data.safe_port_min >= data.safe_port_max:
+        raise HTTPException(status_code=400, detail="Minimum port must be less than maximum port")
+    
+    if data.safe_port_min < 1 or data.safe_port_max > 65535:
+        raise HTTPException(status_code=400, detail="Port range must be between 1 and 65535")
+    
+    with get_db() as conn:
+        cursor = conn.cursor()
+        
+        # Upsert settings
+        cursor.execute('''
+            INSERT OR REPLACE INTO settings (key, value, updated_at)
+            VALUES ('safe_port_min', ?, ?)
+        ''', (str(data.safe_port_min), datetime.now(timezone.utc).isoformat()))
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO settings (key, value, updated_at)
+            VALUES ('safe_port_max', ?, ?)
+        ''', (str(data.safe_port_max), datetime.now(timezone.utc).isoformat()))
+        
+        # Update is_outside_safe_range for all existing rules
+        cursor.execute('''
+            UPDATE port_rules 
+            SET is_outside_safe_range = CASE 
+                WHEN external_port < ? OR external_port > ? THEN 1 
+                ELSE 0 
+            END
+        ''', (data.safe_port_min, data.safe_port_max))
+    
+    return {
+        "message": "Port range settings updated",
+        "safe_port_min": data.safe_port_min,
+        "safe_port_max": data.safe_port_max
     }
 
 @api_router.get("/")
