@@ -64,7 +64,7 @@ export default function ChangePasswordDialog({ open, onOpenChange, forced = fals
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="bg-card border-border sm:max-w-md" hideCloseButton={forced}>
+      <DialogContent className="bg-card border-border sm:max-w-md">
         <DialogHeader>
           <DialogTitle className="text-white flex items-center gap-2">
             {forced && <AlertTriangle className="w-5 h-5 text-amber-400" />}
