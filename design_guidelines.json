@@ -1,0 +1,154 @@
+{
+  "project_name": "SecureComm (Discord Alternative)",
+  "app_type": "hybrid_fullstack",
+  "theme_and_archetype": {
+    "theme": "DARK",
+    "archetype": "Archetype 5 (Jewel & Luxury) - Modified for 'Secure Vault' Stealth",
+    "vibe": "Cinematic, moody, highly secure, expensive, functional. Avoid standard 'gamer' purple/neon aesthetics. Aim for an elite, enterprise-grade privacy tool feel.",
+    "twist": "Rely on texture (grain/noise overlays) and precise lighting (1px inner borders, subtle glows) instead of flat dark colors."
+  },
+  "color_palette": {
+    "background": {
+      "default": "slate-950",
+      "hex": "#020617",
+      "description": "Deepest slate for the main app canvas/body."
+    },
+    "surface": {
+      "panel": "slate-900/80",
+      "glass": "slate-950/60 backdrop-blur-2xl",
+      "elevated": "slate-800",
+      "description": "Panels (like sidebars and message areas) use semi-transparent slate-900 over a noisy background to create depth."
+    },
+    "primary": {
+      "default": "emerald-500",
+      "hover": "emerald-400",
+      "active": "emerald-600",
+      "hex": "#10b981",
+      "description": "A sharp, tactical green signaling secure operations and active states. Used sparingly for main CTAs and 'Online' status."
+    },
+    "secondary": {
+      "default": "slate-800",
+      "hover": "slate-700",
+      "text": "slate-100"
+    },
+    "text": {
+      "heading": "slate-50",
+      "body": "slate-300",
+      "muted": "slate-500",
+      "code": "emerald-400"
+    },
+    "border": {
+      "default": "slate-800/50",
+      "divider": "white/5",
+      "focus": "emerald-500/50"
+    },
+    "status": {
+      "online": "emerald-500",
+      "away": "amber-500",
+      "busy": "red-500",
+      "invisible": "slate-600"
+    }
+  },
+  "typography": {
+    "font_families": {
+      "heading": "Outfit, sans-serif",
+      "body": "IBM Plex Sans, sans-serif",
+      "mono": "IBM Plex Mono, monospace"
+    },
+    "rules": {
+      "headings": "font-light to font-medium, tracking-tight. NEVER use generic sans or Inter. Use Outfit for a crisp, geometric tech feel.",
+      "body": "leading-relaxed, tracking-normal. Prioritize extreme legibility.",
+      "mono": "Use for timestamps, file sizes, IP logs, and encryption keys. tracking-widest for labels.",
+      "hierarchy": {
+        "h1": "text-4xl sm:text-5xl font-medium tracking-tighter text-slate-50",
+        "h2": "text-2xl sm:text-3xl font-normal tracking-tight text-slate-100",
+        "h3": "text-xl font-medium text-slate-200",
+        "body": "text-base text-slate-300",
+        "small_label": "text-xs font-mono uppercase tracking-widest text-slate-500"
+      }
+    }
+  },
+  "layout_and_spacing": {
+    "strategy": "The 'Control Room' Grid",
+    "description": "Density, Data Correlation, and Scanability. Every pixel must be utilized efficiently. Use sharp edges or minimal rounding (max 8px).",
+    "structure": {
+      "app_shell": "Use h-screen w-full flex overflow-hidden. Sidebar fixed width (e.g., w-64), Main Content flex-1.",
+      "server_nav": "Extreme left, w-16 or w-20, densely packed server icons.",
+      "channel_nav": "w-60 bg-slate-900/50 border-r border-white/5.",
+      "chat_area": "flex-1 flex flex-col bg-slate-950 relative.",
+      "members_panel": "w-64 bg-slate-900/30 border-l border-white/5 hidden lg:block."
+    },
+    "spacing_scale": {
+      "app_padding": "p-0 (edge to edge)",
+      "panel_internal": "p-4 or p-6",
+      "message_gap": "gap-1 (consecutive) or gap-4 (new sender)"
+    },
+    "technical_rules": [
+      "Mobile-first: App must collapse into single-column with hamburger menu for sidebars.",
+      "Grid children must be direct children. Use align-self: stretch for columns.",
+      "Ensure scrollable areas (messages) have customized scrollbars (dark, thin, no gutter)."
+    ]
+  },
+  "component_rules": {
+    "surfaces": {
+      "glassmorphism": "Use for sticky headers/floating modals. backdrop-blur-2xl bg-slate-950/60 with a 1px border-b border-white/10.",
+      "cards": "Flat background (slate-900), 1px border-white/5, NO heavy drop shadows. Sharp or 8px max radius."
+    },
+    "inputs": {
+      "chat_input": "bg-slate-900 border border-white/10 rounded-lg px-4 py-3 text-slate-100 focus:ring-1 focus:ring-emerald-500/50 outline-none.",
+      "forms": "Use Shadcn customized primitives. Avoid native select/date inputs."
+    },
+    "buttons": {
+      "primary": "bg-emerald-500 text-slate-950 font-medium hover:bg-emerald-400 transition-colors rounded-md px-4 py-2",
+      "secondary": "bg-slate-800 text-slate-100 border border-white/5 hover:bg-slate-700 transition-colors rounded-md px-4 py-2",
+      "ghost": "hover:bg-slate-800/50 text-slate-300 hover:text-slate-100 transition-colors"
+    },
+    "chat_bubbles": {
+      "style": "Do NOT use rounded 'iMessage' bubbles. Use a clean, horizontal row layout (Avatar left, Name/Time top, Message bottom) similar to Slack/Discord professional mode. Transparent background for messages, hover effect (bg-slate-900/50) for actions."
+    }
+  },
+  "motion_and_interactions": {
+    "hover_states": "All interactive elements MUST explicitly set text color on hover (e.g., hover:bg-slate-800 hover:text-white).",
+    "transitions": "Use specific properties: transition: transform 0.2s ease, opacity 0.2s ease.",
+    "chat_feed": "Subtle entrance animation for new messages (fade-in, slide-up 4px)."
+  },
+  "icons_and_assets": {
+    "library": "@phosphor-icons/react",
+    "usage": "Use standard or duotone weight for a technical, precise look. Install via: yarn add @phosphor-icons/react",
+    "image_urls": {
+      "hero_background": {
+        "url": "https://images.unsplash.com/photo-1761078739436-ccee01f3d89c?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGRhcmslMjB0ZXh0dXJlfGVufDB8fHx8MTc3NTY1MTIwOXww&ixlib=rb-4.1.0&q=85",
+        "description": "Dark, moody abstract texture for the Web Landing Page hero background. Overlay with bg-slate-950/80.",
+        "category": "marketing_hero"
+      },
+      "avatar_1": {
+        "url": "https://images.unsplash.com/photo-1611111082664-534b2cd71d6f?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NDh8MHwxfHNlYXJjaHwxfHxwZXJzb24lMjBwb3J0cmFpdCUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3NTY5MDU3N3ww&ixlib=rb-4.1.0&q=85",
+        "description": "User Avatar Placeholder 1",
+        "category": "avatar"
+      },
+      "avatar_2": {
+        "url": "https://images.unsplash.com/photo-1614010966237-74489a16848b?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NDh8MHwxfHNlYXJjaHwyfHxwZXJzb24lMjBwb3J0cmFpdCUyMGRhcmslMjBiYWNrZ3JvdW5kfGVufDB8fHx8MTc3NTY5MDU3N3ww&ixlib=rb-4.1.0&q=85",
+        "description": "User Avatar Placeholder 2",
+        "category": "avatar"
+      },
+      "avatar_3": {
+        "url": "https://images.pexels.com/photos/5349053/pexels-photo-5349053.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "User Avatar Placeholder 3",
+        "category": "avatar"
+      }
+    }
+  },
+  "accessibility_and_testing": {
+    "contrast": "Ensure text over dark backgrounds meets APCA standards. Muted text should not be darker than slate-500.",
+    "testing_attributes": "All interactive and key informational elements MUST include a data-testid attribute (e.g., data-testid='login-submit-button', data-testid='chat-message-input').",
+    "focus": "All actionable items must have explicit focus states with higher contrast."
+  },
+  "instructions_to_main_agent": [
+    "Prioritize the Web UI (PWA) first. Use standard HTML/Tailwind for the landing page, and heavily customized Shadcn for the main application.",
+    "Theme is strictly DARK. Do not implement a light theme unless specifically toggled.",
+    "Implement WebRTC placeholders for voice/video UI showing quality selectors up to 2160p 60fps.",
+    "For the 'Share Drive' feature, use a grid or detailed list layout resembling a highly secure file manager (like an encrypted vault), utilizing monospace fonts for file sizes.",
+    "Admin Dashboard must utilize the 'Control Room' grid layout with dense data visualization (use Recharts with emerald and slate accents).",
+    "In the chat UI, include a message history feed and input box with options for attachments, screen sharing, and user status indicators (Online, Away, Busy, Invisible) matching the defined status colors."
+  ]
+}
