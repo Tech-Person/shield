@@ -1,89 +1,1289 @@
-from fastapi import FastAPI, APIRouter
 from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
-import os
-import logging
 from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List
-import uuid
-from datetime import datetime, timezone
-
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
+from fastapi import FastAPI, APIRouter, Request, Response, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Query, Depends
+from fastapi.responses import JSONResponse
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
+import os
+import logging
+import uuid
+import json
+import bcrypt
+import jwt
+import pyotp
+import qrcode
+import io
+import base64
+from datetime import datetime, timezone, timedelta
+from typing import Optional, List
+
+from models import (
+    UserCreate, UserLogin, TwoFactorVerify, UserUpdate, StatusUpdate,
+    FriendRequest, ServerCreate, ServerUpdate, ChannelCreate, ChannelUpdate,
+    RoleCreate, RoleUpdate, MessageCreate, DMCreate, GroupDMCreate,
+    SearchQuery, InviteCreate, Permissions
+)
+from encryption import encrypt_text, decrypt_text
+from websocket_manager import manager
+from storage_utils import init_storage, put_object, get_object, generate_storage_path
+
+# MongoDB
 mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-# Create the main app without a prefix
-app = FastAPI()
-
-# Create a router with the /api prefix
+app = FastAPI(title="SecureComm API")
 api_router = APIRouter(prefix="/api")
 
+JWT_SECRET = os.environ['JWT_SECRET']
+JWT_ALGORITHM = "HS256"
 
-# Define Models
-class StatusCheck(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # Ignore MongoDB's _id field
-    
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+# ─── Helpers ───
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
-async def root():
-    return {"message": "Hello World"}
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.model_dump()
-    status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
-    doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
-    return status_obj
+def create_access_token(user_id: str, username: str) -> str:
+    payload = {"sub": user_id, "username": username, "exp": datetime.now(timezone.utc) + timedelta(hours=24), "type": "access"}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    # Exclude MongoDB's _id field from the query results
-    status_checks = await db.status_checks.find({}, {"_id": 0}).to_list(1000)
-    
-    # Convert ISO string timestamps back to datetime objects
-    for check in status_checks:
-        if isinstance(check['timestamp'], str):
-            check['timestamp'] = datetime.fromisoformat(check['timestamp'])
-    
-    return status_checks
+def create_refresh_token(user_id: str) -> str:
+    payload = {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=7), "type": "refresh"}
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-# Include the router in the main app
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+
+async def get_current_user(request: Request) -> dict:
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "access":
+            raise HTTPException(status_code=401, detail="Invalid token type")
+        user = await db.users.find_one({"id": payload["sub"]})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        user.pop("_id", None)
+        user.pop("password_hash", None)
+        user.pop("totp_secret", None)
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+def sanitize_user(user: dict) -> dict:
+    u = {k: v for k, v in user.items() if k not in ("_id", "password_hash", "totp_secret")}
+    return u
+
+def has_permission(member_permissions: int, required: int) -> bool:
+    if member_permissions & Permissions.ADMINISTRATOR:
+        return True
+    return (member_permissions & required) == required
+
+# ─── AUTH ROUTES ───
+@api_router.post("/auth/register")
+async def register(data: UserCreate, response: Response):
+    email = data.email.lower().strip()
+    username = data.username.strip()
+    if len(username) < 3:
+        raise HTTPException(400, "Username must be at least 3 characters")
+    if len(data.password) < 6:
+        raise HTTPException(400, "Password must be at least 6 characters")
+    if await db.users.find_one({"email": email}):
+        raise HTTPException(400, "Email already registered")
+    if await db.users.find_one({"username_lower": username.lower()}):
+        raise HTTPException(400, "Username already taken")
+
+    user_id = str(uuid.uuid4())
+    user_doc = {
+        "id": user_id,
+        "username": username,
+        "username_lower": username.lower(),
+        "email": email,
+        "password_hash": hash_password(data.password),
+        "display_name": username,
+        "avatar_url": None,
+        "about": "",
+        "status": "online",
+        "status_message": None,
+        "status_message_expires": None,
+        "totp_enabled": False,
+        "totp_secret": None,
+        "role": "user",
+        "friends": [],
+        "blocked": [],
+        "friend_requests_sent": [],
+        "friend_requests_received": [],
+        "storage_used_bytes": 0,
+        "storage_limit_bytes": 5 * 1024 * 1024 * 1024,
+        "last_active": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.users.insert_one(user_doc)
+    access = create_access_token(user_id, username)
+    refresh = create_refresh_token(user_id)
+    set_auth_cookies(response, access, refresh)
+    return {"user": sanitize_user(user_doc), "access_token": access}
+
+@api_router.post("/auth/login")
+async def login(data: UserLogin, request: Request, response: Response):
+    email = data.email.lower().strip()
+    ip = request.client.host if request.client else "unknown"
+    identifier = f"{ip}:{email}"
+
+    attempt = await db.login_attempts.find_one({"identifier": identifier}, {"_id": 0})
+    if attempt and attempt.get("count", 0) >= 5:
+        locked_until = attempt.get("locked_until")
+        if locked_until and datetime.fromisoformat(locked_until) > datetime.now(timezone.utc):
+            raise HTTPException(429, "Too many attempts. Try again in 15 minutes.")
+        else:
+            await db.login_attempts.delete_one({"identifier": identifier})
+
+    user = await db.users.find_one({"email": email})
+    if not user or not verify_password(data.password, user["password_hash"]):
+        await db.login_attempts.update_one(
+            {"identifier": identifier},
+            {"$inc": {"count": 1}, "$set": {"locked_until": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()}},
+            upsert=True
+        )
+        raise HTTPException(401, "Invalid email or password")
+
+    await db.login_attempts.delete_one({"identifier": identifier})
+
+    if user.get("totp_enabled"):
+        temp_token = jwt.encode(
+            {"sub": user["id"], "type": "2fa_pending", "exp": datetime.now(timezone.utc) + timedelta(minutes=5)},
+            JWT_SECRET, algorithm=JWT_ALGORITHM
+        )
+        return {"requires_2fa": True, "temp_token": temp_token}
+
+    await db.users.update_one({"id": user["id"]}, {"$set": {"status": "online", "last_active": datetime.now(timezone.utc).isoformat()}})
+    access = create_access_token(user["id"], user["username"])
+    refresh = create_refresh_token(user["id"])
+    set_auth_cookies(response, access, refresh)
+    return {"user": sanitize_user(user), "access_token": access}
+
+@api_router.post("/auth/verify-2fa")
+async def verify_2fa(data: TwoFactorVerify, request: Request, response: Response, temp_token: str = Query(...)):
+    try:
+        payload = jwt.decode(temp_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "2fa_pending":
+            raise HTTPException(401, "Invalid token")
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid or expired token")
+
+    user = await db.users.find_one({"id": payload["sub"]})
+    if not user or not user.get("totp_secret"):
+        raise HTTPException(400, "2FA not configured")
+
+    totp = pyotp.TOTP(user["totp_secret"])
+    if not totp.verify(data.code, valid_window=1):
+        raise HTTPException(401, "Invalid 2FA code")
+
+    await db.users.update_one({"id": user["id"]}, {"$set": {"status": "online", "last_active": datetime.now(timezone.utc).isoformat()}})
+    access = create_access_token(user["id"], user["username"])
+    refresh = create_refresh_token(user["id"])
+    set_auth_cookies(response, access, refresh)
+    return {"user": sanitize_user(user), "access_token": access}
+
+@api_router.post("/auth/setup-2fa")
+async def setup_2fa(request: Request):
+    user = await get_current_user(request)
+    secret = pyotp.random_base32()
+    totp = pyotp.TOTP(secret)
+    uri = totp.provisioning_uri(name=user["email"], issuer_name="SecureComm")
+    qr = qrcode.make(uri)
+    buf = io.BytesIO()
+    qr.save(buf, format="PNG")
+    qr_b64 = base64.b64encode(buf.getvalue()).decode()
+    await db.users.update_one({"id": user["id"]}, {"$set": {"totp_secret": secret}})
+    return {"secret": secret, "qr_code": f"data:image/png;base64,{qr_b64}", "uri": uri}
+
+@api_router.post("/auth/confirm-2fa")
+async def confirm_2fa(data: TwoFactorVerify, request: Request):
+    user = await get_current_user(request)
+    full_user = await db.users.find_one({"id": user["id"]})
+    if not full_user or not full_user.get("totp_secret"):
+        raise HTTPException(400, "Setup 2FA first")
+    totp = pyotp.TOTP(full_user["totp_secret"])
+    if not totp.verify(data.code, valid_window=1):
+        raise HTTPException(400, "Invalid code")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"totp_enabled": True}})
+    return {"message": "2FA enabled successfully"}
+
+@api_router.post("/auth/disable-2fa")
+async def disable_2fa(data: TwoFactorVerify, request: Request):
+    user = await get_current_user(request)
+    full_user = await db.users.find_one({"id": user["id"]})
+    if not full_user or not full_user.get("totp_enabled"):
+        raise HTTPException(400, "2FA not enabled")
+    totp = pyotp.TOTP(full_user["totp_secret"])
+    if not totp.verify(data.code, valid_window=1):
+        raise HTTPException(400, "Invalid code")
+    await db.users.update_one({"id": user["id"]}, {"$set": {"totp_enabled": False, "totp_secret": None}})
+    return {"message": "2FA disabled"}
+
+@api_router.get("/auth/me")
+async def get_me(request: Request):
+    user = await get_current_user(request)
+    return {"user": user}
+
+@api_router.post("/auth/logout")
+async def logout(request: Request, response: Response):
+    try:
+        user = await get_current_user(request)
+        await db.users.update_one({"id": user["id"]}, {"$set": {"last_active": datetime.now(timezone.utc).isoformat()}})
+    except Exception:
+        pass
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("refresh_token", path="/")
+    return {"message": "Logged out"}
+
+@api_router.post("/auth/refresh")
+async def refresh_token(request: Request, response: Response):
+    token = request.cookies.get("refresh_token")
+    if not token:
+        raise HTTPException(401, "No refresh token")
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(401, "Invalid token type")
+        user = await db.users.find_one({"id": payload["sub"]})
+        if not user:
+            raise HTTPException(401, "User not found")
+        access = create_access_token(user["id"], user["username"])
+        response.set_cookie(key="access_token", value=access, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
+        return {"access_token": access}
+    except jwt.InvalidTokenError:
+        raise HTTPException(401, "Invalid refresh token")
+
+# ─── USER ROUTES ───
+@api_router.get("/users/me")
+async def get_user_profile(request: Request):
+    user = await get_current_user(request)
+    return user
+
+@api_router.put("/users/me")
+async def update_profile(data: UserUpdate, request: Request):
+    user = await get_current_user(request)
+    updates = {k: v for k, v in data.model_dump(exclude_unset=True).items()}
+    if updates:
+        await db.users.update_one({"id": user["id"]}, {"$set": updates})
+    updated = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0, "totp_secret": 0})
+    return updated
+
+@api_router.put("/users/me/status")
+async def update_status(data: StatusUpdate, request: Request):
+    user = await get_current_user(request)
+    if data.status not in ("online", "away", "busy", "invisible"):
+        raise HTTPException(400, "Invalid status")
+    updates = {"status": data.status, "last_active": datetime.now(timezone.utc).isoformat()}
+    if data.status_message is not None:
+        updates["status_message"] = data.status_message
+        if data.status_expires_minutes:
+            updates["status_message_expires"] = (datetime.now(timezone.utc) + timedelta(minutes=data.status_expires_minutes)).isoformat()
+        else:
+            updates["status_message_expires"] = None
+    await db.users.update_one({"id": user["id"]}, {"$set": updates})
+    await manager.broadcast_to_users(
+        user.get("friends", []),
+        {"type": "status_update", "user_id": user["id"], "status": data.status, "status_message": data.status_message}
+    )
+    return {"message": "Status updated"}
+
+@api_router.get("/users/search")
+async def search_users(q: str, request: Request):
+    await get_current_user(request)
+    users = await db.users.find(
+        {"username_lower": {"$regex": q.lower(), "$options": "i"}},
+        {"_id": 0, "password_hash": 0, "totp_secret": 0, "email": 0}
+    ).limit(20).to_list(20)
+    return users
+
+@api_router.get("/users/{user_id}")
+async def get_user(user_id: str, request: Request):
+    await get_current_user(request)
+    user = await db.users.find_one({"id": user_id}, {"_id": 0, "password_hash": 0, "totp_secret": 0, "email": 0})
+    if not user:
+        raise HTTPException(404, "User not found")
+    online = manager.is_online(user_id)
+    user["is_online"] = online if user.get("status") != "invisible" else False
+    if user.get("status_message_expires"):
+        exp = datetime.fromisoformat(user["status_message_expires"])
+        if exp < datetime.now(timezone.utc):
+            user["status_message"] = None
+    return user
+
+# ─── FRIENDS ROUTES ───
+@api_router.post("/friends/request")
+async def send_friend_request(data: FriendRequest, request: Request):
+    user = await get_current_user(request)
+    target = await db.users.find_one({"username_lower": data.username.lower()}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if target["id"] == user["id"]:
+        raise HTTPException(400, "Cannot friend yourself")
+    if target["id"] in user.get("friends", []):
+        raise HTTPException(400, "Already friends")
+    if target["id"] in user.get("blocked", []):
+        raise HTTPException(400, "User is blocked")
+    if user["id"] in target.get("blocked", []):
+        raise HTTPException(400, "You are blocked by this user")
+    if target["id"] in user.get("friend_requests_sent", []):
+        raise HTTPException(400, "Request already sent")
+
+    if user["id"] in target.get("friend_requests_sent", []):
+        await db.users.update_one({"id": user["id"]}, {
+            "$addToSet": {"friends": target["id"]},
+            "$pull": {"friend_requests_received": target["id"]}
+        })
+        await db.users.update_one({"id": target["id"]}, {
+            "$addToSet": {"friends": user["id"]},
+            "$pull": {"friend_requests_sent": user["id"]}
+        })
+        await manager.send_personal(target["id"], {"type": "friend_accepted", "user": sanitize_user(user)})
+        return {"message": "Friend added (mutual request)"}
+
+    await db.users.update_one({"id": user["id"]}, {"$addToSet": {"friend_requests_sent": target["id"]}})
+    await db.users.update_one({"id": target["id"]}, {"$addToSet": {"friend_requests_received": user["id"]}})
+    await manager.send_personal(target["id"], {"type": "friend_request", "user": sanitize_user(user)})
+    return {"message": "Friend request sent"}
+
+@api_router.post("/friends/accept/{user_id}")
+async def accept_friend(user_id: str, request: Request):
+    user = await get_current_user(request)
+    if user_id not in user.get("friend_requests_received", []):
+        raise HTTPException(400, "No pending request from this user")
+    await db.users.update_one({"id": user["id"]}, {
+        "$addToSet": {"friends": user_id},
+        "$pull": {"friend_requests_received": user_id}
+    })
+    await db.users.update_one({"id": user_id}, {
+        "$addToSet": {"friends": user["id"]},
+        "$pull": {"friend_requests_sent": user["id"]}
+    })
+    await manager.send_personal(user_id, {"type": "friend_accepted", "user": sanitize_user(user)})
+    return {"message": "Friend request accepted"}
+
+@api_router.post("/friends/reject/{user_id}")
+async def reject_friend(user_id: str, request: Request):
+    user = await get_current_user(request)
+    await db.users.update_one({"id": user["id"]}, {"$pull": {"friend_requests_received": user_id}})
+    await db.users.update_one({"id": user_id}, {"$pull": {"friend_requests_sent": user["id"]}})
+    return {"message": "Friend request rejected"}
+
+@api_router.delete("/friends/{user_id}")
+async def remove_friend(user_id: str, request: Request):
+    user = await get_current_user(request)
+    await db.users.update_one({"id": user["id"]}, {"$pull": {"friends": user_id}})
+    await db.users.update_one({"id": user_id}, {"$pull": {"friends": user["id"]}})
+    return {"message": "Friend removed"}
+
+@api_router.post("/friends/block/{user_id}")
+async def block_user(user_id: str, request: Request):
+    user = await get_current_user(request)
+    await db.users.update_one({"id": user["id"]}, {
+        "$addToSet": {"blocked": user_id},
+        "$pull": {"friends": user_id, "friend_requests_received": user_id, "friend_requests_sent": user_id}
+    })
+    await db.users.update_one({"id": user_id}, {"$pull": {"friends": user["id"]}})
+    return {"message": "User blocked"}
+
+@api_router.post("/friends/unblock/{user_id}")
+async def unblock_user(user_id: str, request: Request):
+    user = await get_current_user(request)
+    await db.users.update_one({"id": user["id"]}, {"$pull": {"blocked": user_id}})
+    return {"message": "User unblocked"}
+
+@api_router.get("/friends")
+async def get_friends(request: Request):
+    user = await get_current_user(request)
+    full_user = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    friends = []
+    for fid in full_user.get("friends", []):
+        f = await db.users.find_one({"id": fid}, {"_id": 0, "password_hash": 0, "totp_secret": 0, "email": 0})
+        if f:
+            f["is_online"] = manager.is_online(fid) if f.get("status") != "invisible" else False
+            friends.append(f)
+    pending_in = []
+    for pid in full_user.get("friend_requests_received", []):
+        p = await db.users.find_one({"id": pid}, {"_id": 0, "password_hash": 0, "totp_secret": 0, "email": 0})
+        if p:
+            pending_in.append(p)
+    pending_out = []
+    for pid in full_user.get("friend_requests_sent", []):
+        p = await db.users.find_one({"id": pid}, {"_id": 0, "password_hash": 0, "totp_secret": 0, "email": 0})
+        if p:
+            pending_out.append(p)
+    return {"friends": friends, "pending_incoming": pending_in, "pending_outgoing": pending_out, "blocked": full_user.get("blocked", [])}
+
+# ─── DM ROUTES ───
+@api_router.post("/dm/create")
+async def create_dm(data: DMCreate, request: Request):
+    user = await get_current_user(request)
+    existing = await db.conversations.find_one({
+        "type": "dm",
+        "participants": {"$all": [user["id"], data.recipient_id], "$size": 2}
+    }, {"_id": 0})
+    if existing:
+        return existing
+
+    conv_id = str(uuid.uuid4())
+    conv = {
+        "id": conv_id,
+        "type": "dm",
+        "participants": [user["id"], data.recipient_id],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_message_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.conversations.insert_one(conv)
+    conv.pop("_id", None)
+    return conv
+
+@api_router.post("/dm/group")
+async def create_group_dm(data: GroupDMCreate, request: Request):
+    user = await get_current_user(request)
+    all_members = list(set([user["id"]] + data.member_ids))
+    conv_id = str(uuid.uuid4())
+    conv = {
+        "id": conv_id,
+        "type": "group_dm",
+        "name": data.name or "Group Chat",
+        "participants": all_members,
+        "owner_id": user["id"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_message_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.conversations.insert_one(conv)
+    conv.pop("_id", None)
+    return conv
+
+@api_router.get("/dm/conversations")
+async def get_conversations(request: Request):
+    user = await get_current_user(request)
+    convos = await db.conversations.find(
+        {"participants": user["id"]},
+        {"_id": 0}
+    ).sort("last_message_at", -1).to_list(100)
+    for conv in convos:
+        if conv["type"] == "dm":
+            other_id = [p for p in conv["participants"] if p != user["id"]]
+            if other_id:
+                other = await db.users.find_one({"id": other_id[0]}, {"_id": 0, "password_hash": 0, "totp_secret": 0})
+                if other:
+                    other["is_online"] = manager.is_online(other_id[0]) if other.get("status") != "invisible" else False
+                    conv["other_user"] = other
+        last_msg = await db.messages.find_one(
+            {"conversation_id": conv["id"]}, {"_id": 0}, sort=[("created_at", -1)]
+        )
+        if last_msg and last_msg.get("content_encrypted"):
+            last_msg["content"] = decrypt_text(last_msg["content_encrypted"])
+            last_msg.pop("content_encrypted", None)
+            last_msg.pop("search_index", None)
+        conv["last_message"] = last_msg
+    return convos
+
+@api_router.post("/dm/{conversation_id}/messages")
+async def send_dm_message(conversation_id: str, data: MessageCreate, request: Request):
+    user = await get_current_user(request)
+    conv = await db.conversations.find_one({"id": conversation_id, "participants": user["id"]}, {"_id": 0})
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+
+    msg_id = str(uuid.uuid4())
+    encrypted_content = encrypt_text(data.content)
+    search_tokens = " ".join(data.content.lower().split())
+
+    msg = {
+        "id": msg_id,
+        "conversation_id": conversation_id,
+        "sender_id": user["id"],
+        "sender_username": user["username"],
+        "sender_avatar": user.get("avatar_url"),
+        "content_encrypted": encrypted_content,
+        "search_index": encrypt_text(search_tokens),
+        "attachments": data.attachments or [],
+        "edited": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.messages.insert_one(msg)
+    await db.conversations.update_one({"id": conversation_id}, {"$set": {"last_message_at": datetime.now(timezone.utc).isoformat()}})
+
+    broadcast_msg = {
+        "type": "new_message",
+        "message": {
+            "id": msg_id,
+            "conversation_id": conversation_id,
+            "sender_id": user["id"],
+            "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "content": data.content,
+            "attachments": data.attachments or [],
+            "edited": False,
+            "created_at": msg["created_at"]
+        }
+    }
+    for pid in conv["participants"]:
+        if pid != user["id"]:
+            await manager.send_personal(pid, broadcast_msg)
+    await manager.broadcast_dm(conversation_id, broadcast_msg, exclude=user["id"])
+
+    await db.stats.update_one({"key": "global"}, {"$inc": {"messages_sent": 1}}, upsert=True)
+
+    resp = broadcast_msg["message"].copy()
+    resp.pop("_id", None)
+    return resp
+
+@api_router.get("/dm/{conversation_id}/messages")
+async def get_dm_messages(conversation_id: str, request: Request, before: Optional[str] = None, limit: int = 50):
+    user = await get_current_user(request)
+    conv = await db.conversations.find_one({"id": conversation_id, "participants": user["id"]}, {"_id": 0})
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+
+    query = {"conversation_id": conversation_id}
+    if before:
+        query["created_at"] = {"$lt": before}
+
+    messages = await db.messages.find(query, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    for msg in messages:
+        if msg.get("content_encrypted"):
+            msg["content"] = decrypt_text(msg["content_encrypted"])
+        msg.pop("content_encrypted", None)
+        msg.pop("search_index", None)
+    messages.reverse()
+    return messages
+
+@api_router.post("/dm/search")
+async def search_messages(data: SearchQuery, request: Request):
+    user = await get_current_user(request)
+    query_lower = data.query.lower()
+    if data.conversation_id:
+        conv = await db.conversations.find_one({"id": data.conversation_id, "participants": user["id"]}, {"_id": 0})
+        if not conv:
+            raise HTTPException(404, "Conversation not found")
+        messages = await db.messages.find({"conversation_id": data.conversation_id}, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+    else:
+        user_convos = await db.conversations.find({"participants": user["id"]}, {"_id": 0, "id": 1}).to_list(100)
+        conv_ids = [c["id"] for c in user_convos]
+        messages = await db.messages.find({"conversation_id": {"$in": conv_ids}}, {"_id": 0}).sort("created_at", -1).limit(500).to_list(500)
+
+    results = []
+    for msg in messages:
+        content = decrypt_text(msg.get("content_encrypted", ""))
+        if query_lower in content.lower():
+            msg["content"] = content
+            msg.pop("content_encrypted", None)
+            msg.pop("search_index", None)
+            results.append(msg)
+            if len(results) >= data.limit:
+                break
+    return results
+
+# ─── SERVER ROUTES ───
+@api_router.post("/servers")
+async def create_server(data: ServerCreate, request: Request):
+    user = await get_current_user(request)
+    server_id = str(uuid.uuid4())
+    default_role_id = str(uuid.uuid4())
+
+    server = {
+        "id": server_id,
+        "name": data.name,
+        "description": data.description or "",
+        "icon_url": data.icon_url,
+        "owner_id": user["id"],
+        "roles": [{
+            "id": default_role_id,
+            "name": "@everyone",
+            "color": "#99AAB5",
+            "permissions": Permissions.DEFAULT,
+            "position": 0
+        }],
+        "channels": [],
+        "storage_used_bytes": 0,
+        "storage_limit_bytes": 25 * 1024 * 1024 * 1024,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.servers.insert_one(server)
+
+    general_channel_id = str(uuid.uuid4())
+    general_voice_id = str(uuid.uuid4())
+    channels = [
+        {"id": general_channel_id, "server_id": server_id, "name": "general", "channel_type": "text", "category": "Text Channels", "topic": "", "slowmode_seconds": 0, "created_at": datetime.now(timezone.utc).isoformat()},
+        {"id": general_voice_id, "server_id": server_id, "name": "General", "channel_type": "voice", "category": "Voice Channels", "topic": "", "slowmode_seconds": 0, "created_at": datetime.now(timezone.utc).isoformat()}
+    ]
+    await db.channels.insert_many(channels)
+
+    member = {
+        "id": str(uuid.uuid4()),
+        "server_id": server_id,
+        "user_id": user["id"],
+        "username": user["username"],
+        "display_name": user.get("display_name", user["username"]),
+        "avatar_url": user.get("avatar_url"),
+        "roles": [default_role_id],
+        "is_owner": True,
+        "joined_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.server_members.insert_one(member)
+
+    invite_code = str(uuid.uuid4())[:8]
+    await db.invites.insert_one({
+        "id": str(uuid.uuid4()),
+        "code": invite_code,
+        "server_id": server_id,
+        "creator_id": user["id"],
+        "max_uses": None,
+        "uses": 0,
+        "expires_at": None,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+
+    await db.stats.update_one({"key": "global"}, {"$inc": {"total_servers": 1}}, upsert=True)
+    server.pop("_id", None)
+    server["invite_code"] = invite_code
+    return server
+
+@api_router.get("/servers")
+async def get_user_servers(request: Request):
+    user = await get_current_user(request)
+    memberships = await db.server_members.find({"user_id": user["id"]}, {"_id": 0}).to_list(100)
+    server_ids = [m["server_id"] for m in memberships]
+    servers = await db.servers.find({"id": {"$in": server_ids}}, {"_id": 0}).to_list(100)
+    return servers
+
+@api_router.get("/servers/{server_id}")
+async def get_server(server_id: str, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]}, {"_id": 0})
+    if not member:
+        raise HTTPException(403, "Not a member of this server")
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server:
+        raise HTTPException(404, "Server not found")
+    channels = await db.channels.find({"server_id": server_id}, {"_id": 0}).to_list(100)
+    members = await db.server_members.find({"server_id": server_id}, {"_id": 0}).to_list(1000)
+    for m in members:
+        m["is_online"] = manager.is_online(m["user_id"])
+    server["channels"] = channels
+    server["members"] = members
+    server["member_count"] = len(members)
+    return server
+
+@api_router.put("/servers/{server_id}")
+async def update_server(server_id: str, data: ServerUpdate, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server:
+        raise HTTPException(404, "Server not found")
+    if server["owner_id"] != user["id"]:
+        raise HTTPException(403, "Only the owner can update server settings")
+    updates = {k: v for k, v in data.model_dump(exclude_unset=True).items()}
+    if "storage_limit_gb" in updates:
+        updates["storage_limit_bytes"] = int(updates.pop("storage_limit_gb") * 1024 * 1024 * 1024)
+    if updates:
+        await db.servers.update_one({"id": server_id}, {"$set": updates})
+    return {"message": "Server updated"}
+
+@api_router.delete("/servers/{server_id}")
+async def delete_server(server_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "Only the owner can delete a server")
+    await db.servers.delete_one({"id": server_id})
+    await db.channels.delete_many({"server_id": server_id})
+    await db.server_members.delete_many({"server_id": server_id})
+    await db.channel_messages.delete_many({"server_id": server_id})
+    await db.invites.delete_many({"server_id": server_id})
+    await db.stats.update_one({"key": "global"}, {"$inc": {"total_servers": -1}}, upsert=True)
+    return {"message": "Server deleted"}
+
+# ─── INVITE / JOIN ───
+@api_router.post("/servers/{server_id}/invites")
+async def create_invite(server_id: str, data: InviteCreate, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]}, {"_id": 0})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    code = str(uuid.uuid4())[:8]
+    invite = {
+        "id": str(uuid.uuid4()),
+        "code": code,
+        "server_id": server_id,
+        "creator_id": user["id"],
+        "max_uses": data.max_uses,
+        "uses": 0,
+        "expires_at": (datetime.now(timezone.utc) + timedelta(hours=data.expires_hours)).isoformat() if data.expires_hours else None,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.invites.insert_one(invite)
+    invite.pop("_id", None)
+    return invite
+
+@api_router.post("/invites/{code}/join")
+async def join_server(code: str, request: Request):
+    user = await get_current_user(request)
+    invite = await db.invites.find_one({"code": code}, {"_id": 0})
+    if not invite:
+        raise HTTPException(404, "Invalid invite code")
+    if invite.get("expires_at"):
+        exp = datetime.fromisoformat(invite["expires_at"])
+        if exp < datetime.now(timezone.utc):
+            raise HTTPException(400, "Invite expired")
+    if invite.get("max_uses") and invite["uses"] >= invite["max_uses"]:
+        raise HTTPException(400, "Invite max uses reached")
+
+    existing = await db.server_members.find_one({"server_id": invite["server_id"], "user_id": user["id"]})
+    if existing:
+        raise HTTPException(400, "Already a member")
+
+    server = await db.servers.find_one({"id": invite["server_id"]}, {"_id": 0})
+    if not server:
+        raise HTTPException(404, "Server not found")
+
+    default_role = next((r for r in server.get("roles", []) if r["name"] == "@everyone"), None)
+    member = {
+        "id": str(uuid.uuid4()),
+        "server_id": invite["server_id"],
+        "user_id": user["id"],
+        "username": user["username"],
+        "display_name": user.get("display_name", user["username"]),
+        "avatar_url": user.get("avatar_url"),
+        "roles": [default_role["id"]] if default_role else [],
+        "is_owner": False,
+        "joined_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.server_members.insert_one(member)
+    await db.invites.update_one({"code": code}, {"$inc": {"uses": 1}})
+    return {"message": "Joined server", "server": server}
+
+# ─── CHANNEL ROUTES ───
+@api_router.post("/servers/{server_id}/channels")
+async def create_channel(server_id: str, data: ChannelCreate, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server:
+        raise HTTPException(404, "Server not found")
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]}, {"_id": 0})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    if server["owner_id"] != user["id"]:
+        member_perms = 0
+        for role in server.get("roles", []):
+            if role["id"] in member.get("roles", []):
+                member_perms |= role["permissions"]
+        if not has_permission(member_perms, Permissions.MANAGE_CHANNELS):
+            raise HTTPException(403, "No permission to manage channels")
+
+    channel_id = str(uuid.uuid4())
+    channel = {
+        "id": channel_id,
+        "server_id": server_id,
+        "name": data.name.lower().replace(" ", "-"),
+        "channel_type": data.channel_type,
+        "category": data.category or "General",
+        "topic": "",
+        "slowmode_seconds": data.slowmode_seconds,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.channels.insert_one(channel)
+    channel.pop("_id", None)
+    return channel
+
+@api_router.put("/servers/{server_id}/channels/{channel_id}")
+async def update_channel(server_id: str, channel_id: str, data: ChannelUpdate, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    updates = {k: v for k, v in data.model_dump(exclude_unset=True).items()}
+    if updates:
+        await db.channels.update_one({"id": channel_id, "server_id": server_id}, {"$set": updates})
+    return {"message": "Channel updated"}
+
+@api_router.delete("/servers/{server_id}/channels/{channel_id}")
+async def delete_channel(server_id: str, channel_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    await db.channels.delete_one({"id": channel_id, "server_id": server_id})
+    await db.channel_messages.delete_many({"channel_id": channel_id})
+    return {"message": "Channel deleted"}
+
+# ─── CHANNEL MESSAGES ───
+@api_router.post("/channels/{channel_id}/messages")
+async def send_channel_message(channel_id: str, data: MessageCreate, request: Request):
+    user = await get_current_user(request)
+    channel = await db.channels.find_one({"id": channel_id}, {"_id": 0})
+    if not channel:
+        raise HTTPException(404, "Channel not found")
+    member = await db.server_members.find_one({"server_id": channel["server_id"], "user_id": user["id"]}, {"_id": 0})
+    if not member:
+        raise HTTPException(403, "Not a member of this server")
+
+    if channel.get("slowmode_seconds", 0) > 0:
+        last_msg = await db.channel_messages.find_one(
+            {"channel_id": channel_id, "sender_id": user["id"]},
+            {"_id": 0}, sort=[("created_at", -1)]
+        )
+        if last_msg:
+            last_time = datetime.fromisoformat(last_msg["created_at"])
+            diff = (datetime.now(timezone.utc) - last_time).total_seconds()
+            if diff < channel["slowmode_seconds"]:
+                raise HTTPException(429, f"Slowmode active. Wait {int(channel['slowmode_seconds'] - diff)}s")
+
+    msg_id = str(uuid.uuid4())
+    encrypted_content = encrypt_text(data.content)
+    msg = {
+        "id": msg_id,
+        "channel_id": channel_id,
+        "server_id": channel["server_id"],
+        "sender_id": user["id"],
+        "sender_username": user["username"],
+        "sender_avatar": user.get("avatar_url"),
+        "content_encrypted": encrypted_content,
+        "attachments": data.attachments or [],
+        "edited": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.channel_messages.insert_one(msg)
+
+    broadcast_msg = {
+        "type": "channel_message",
+        "message": {
+            "id": msg_id,
+            "channel_id": channel_id,
+            "server_id": channel["server_id"],
+            "sender_id": user["id"],
+            "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "content": data.content,
+            "attachments": data.attachments or [],
+            "edited": False,
+            "created_at": msg["created_at"]
+        }
+    }
+    await manager.broadcast_channel(channel_id, broadcast_msg, exclude=user["id"])
+    await db.stats.update_one({"key": "global"}, {"$inc": {"messages_sent": 1}}, upsert=True)
+
+    resp = broadcast_msg["message"].copy()
+    return resp
+
+@api_router.get("/channels/{channel_id}/messages")
+async def get_channel_messages(channel_id: str, request: Request, before: Optional[str] = None, limit: int = 50):
+    user = await get_current_user(request)
+    channel = await db.channels.find_one({"id": channel_id}, {"_id": 0})
+    if not channel:
+        raise HTTPException(404, "Channel not found")
+    member = await db.server_members.find_one({"server_id": channel["server_id"], "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+
+    query = {"channel_id": channel_id}
+    if before:
+        query["created_at"] = {"$lt": before}
+    messages = await db.channel_messages.find(query, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    for msg in messages:
+        if msg.get("content_encrypted"):
+            msg["content"] = decrypt_text(msg["content_encrypted"])
+        msg.pop("content_encrypted", None)
+    messages.reverse()
+    return messages
+
+# ─── ROLES ───
+@api_router.post("/servers/{server_id}/roles")
+async def create_role(server_id: str, data: RoleCreate, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    role_id = str(uuid.uuid4())
+    role = {"id": role_id, "name": data.name, "color": data.color or "#99AAB5", "permissions": data.permissions, "position": len(server.get("roles", []))}
+    await db.servers.update_one({"id": server_id}, {"$push": {"roles": role}})
+    return role
+
+@api_router.put("/servers/{server_id}/roles/{role_id}")
+async def update_role(server_id: str, role_id: str, data: RoleUpdate, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    updates = {}
+    if data.name is not None:
+        updates["roles.$.name"] = data.name
+    if data.color is not None:
+        updates["roles.$.color"] = data.color
+    if data.permissions is not None:
+        updates["roles.$.permissions"] = data.permissions
+    if updates:
+        await db.servers.update_one({"id": server_id, "roles.id": role_id}, {"$set": updates})
+    return {"message": "Role updated"}
+
+@api_router.post("/servers/{server_id}/members/{user_id}/roles/{role_id}")
+async def assign_role(server_id: str, user_id: str, role_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    await db.server_members.update_one(
+        {"server_id": server_id, "user_id": user_id},
+        {"$addToSet": {"roles": role_id}}
+    )
+    return {"message": "Role assigned"}
+
+@api_router.delete("/servers/{server_id}/members/{user_id}/roles/{role_id}")
+async def remove_role(server_id: str, user_id: str, role_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    await db.server_members.update_one(
+        {"server_id": server_id, "user_id": user_id},
+        {"$pull": {"roles": role_id}}
+    )
+    return {"message": "Role removed"}
+
+# ─── MEMBER MANAGEMENT ───
+@api_router.post("/servers/{server_id}/kick/{user_id}")
+async def kick_member(server_id: str, user_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    if user_id == server["owner_id"]:
+        raise HTTPException(400, "Cannot kick the owner")
+    await db.server_members.delete_one({"server_id": server_id, "user_id": user_id})
+    await manager.send_personal(user_id, {"type": "kicked", "server_id": server_id})
+    return {"message": "Member kicked"}
+
+@api_router.post("/servers/{server_id}/ban/{user_id}")
+async def ban_member(server_id: str, user_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    if user_id == server["owner_id"]:
+        raise HTTPException(400, "Cannot ban the owner")
+    await db.server_members.delete_one({"server_id": server_id, "user_id": user_id})
+    await db.server_bans.insert_one({"server_id": server_id, "user_id": user_id, "banned_at": datetime.now(timezone.utc).isoformat()})
+    return {"message": "Member banned"}
+
+# ─── FILE UPLOAD ───
+@api_router.post("/upload")
+async def upload_file(request: Request, file: UploadFile = File(...), context: str = Query("message")):
+    user = await get_current_user(request)
+    data = await file.read()
+    size = len(data)
+
+    full_user = await db.users.find_one({"id": user["id"]}, {"_id": 0})
+    if full_user["storage_used_bytes"] + size > full_user["storage_limit_bytes"]:
+        raise HTTPException(400, "Storage limit exceeded")
+
+    path = generate_storage_path(user["id"], file.filename, context)
+    result = put_object(path, data, file.content_type or "application/octet-stream")
+
+    file_doc = {
+        "id": str(uuid.uuid4()),
+        "storage_path": result["path"],
+        "original_filename": file.filename,
+        "content_type": file.content_type,
+        "size": size,
+        "uploader_id": user["id"],
+        "context": context,
+        "is_deleted": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.files.insert_one(file_doc)
+    await db.users.update_one({"id": user["id"]}, {"$inc": {"storage_used_bytes": size}})
+    file_doc.pop("_id", None)
+    return file_doc
+
+@api_router.get("/files/{file_id}/download")
+async def download_file(file_id: str, request: Request):
+    user = await get_current_user(request)
+    record = await db.files.find_one({"id": file_id, "is_deleted": False}, {"_id": 0})
+    if not record:
+        raise HTTPException(404, "File not found")
+    data, content_type = get_object(record["storage_path"])
+    return Response(content=data, media_type=record.get("content_type", content_type))
+
+# ─── SHARE DRIVE ───
+@api_router.post("/servers/{server_id}/drive/upload")
+async def upload_drive_file(server_id: str, request: Request, file: UploadFile = File(...)):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server:
+        raise HTTPException(404, "Server not found")
+
+    data = await file.read()
+    size = len(data)
+    if server["storage_used_bytes"] + size > server["storage_limit_bytes"]:
+        raise HTTPException(400, "Server storage limit exceeded")
+
+    path = generate_storage_path(server_id, file.filename, "drive")
+    result = put_object(path, data, file.content_type or "application/octet-stream")
+
+    file_doc = {
+        "id": str(uuid.uuid4()),
+        "server_id": server_id,
+        "storage_path": result["path"],
+        "original_filename": file.filename,
+        "content_type": file.content_type,
+        "size": size,
+        "uploader_id": user["id"],
+        "uploader_username": user["username"],
+        "is_deleted": False,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.drive_files.insert_one(file_doc)
+    await db.servers.update_one({"id": server_id}, {"$inc": {"storage_used_bytes": size}})
+    file_doc.pop("_id", None)
+    return file_doc
+
+@api_router.get("/servers/{server_id}/drive")
+async def list_drive_files(server_id: str, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    files = await db.drive_files.find({"server_id": server_id, "is_deleted": False}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return files
+
+@api_router.delete("/servers/{server_id}/drive/{file_id}")
+async def delete_drive_file(server_id: str, file_id: str, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    file_doc = await db.drive_files.find_one({"id": file_id, "server_id": server_id, "is_deleted": False}, {"_id": 0})
+    if not file_doc:
+        raise HTTPException(404, "File not found")
+    await db.drive_files.update_one({"id": file_id}, {"$set": {"is_deleted": True}})
+    await db.servers.update_one({"id": server_id}, {"$inc": {"storage_used_bytes": -file_doc["size"]}})
+    return {"message": "File deleted"}
+
+# ─── ADMIN ROUTES ───
+@api_router.get("/admin/stats")
+async def get_admin_stats(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    total_users = await db.users.count_documents({})
+    online_users = len(manager.get_online_users())
+    total_servers = await db.servers.count_documents({})
+    total_messages = await db.messages.count_documents({}) + await db.channel_messages.count_documents({})
+    total_files = await db.files.count_documents({"is_deleted": False})
+    total_drive_files = await db.drive_files.count_documents({"is_deleted": False})
+
+    pipeline = [{"$match": {"is_deleted": False}}, {"$group": {"_id": None, "total": {"$sum": "$size"}}}]
+    msg_storage = await db.files.aggregate(pipeline).to_list(1)
+    drive_storage = await db.drive_files.aggregate(pipeline).to_list(1)
+
+    voice_channels_active = sum(1 for v in manager.voice_participants.values() if len(v) > 0)
+
+    stats_doc = await db.stats.find_one({"key": "global"}, {"_id": 0})
+
+    now = datetime.now(timezone.utc)
+    day_ago = (now - timedelta(days=1)).isoformat()
+    week_ago = (now - timedelta(weeks=1)).isoformat()
+    month_ago = (now - timedelta(days=30)).isoformat()
+
+    msgs_today = await db.messages.count_documents({"created_at": {"$gte": day_ago}}) + await db.channel_messages.count_documents({"created_at": {"$gte": day_ago}})
+    msgs_week = await db.messages.count_documents({"created_at": {"$gte": week_ago}}) + await db.channel_messages.count_documents({"created_at": {"$gte": week_ago}})
+    msgs_month = await db.messages.count_documents({"created_at": {"$gte": month_ago}}) + await db.channel_messages.count_documents({"created_at": {"$gte": month_ago}})
+
+    return {
+        "users_registered": total_users,
+        "users_online": online_users,
+        "voice_chats_active": voice_channels_active,
+        "total_servers": total_servers,
+        "total_messages": total_messages,
+        "messages_today": msgs_today,
+        "messages_this_week": msgs_week,
+        "messages_this_month": msgs_month,
+        "total_files": total_files,
+        "total_drive_files": total_drive_files,
+        "message_attachment_storage_bytes": msg_storage[0]["total"] if msg_storage else 0,
+        "drive_storage_bytes": drive_storage[0]["total"] if drive_storage else 0,
+        "relay_streams": []
+    }
+
+@api_router.get("/admin/servers")
+async def admin_list_servers(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    servers = await db.servers.find({}, {"_id": 0}).to_list(1000)
+    for s in servers:
+        s["member_count"] = await db.server_members.count_documents({"server_id": s["id"]})
+        drive_pipe = [{"$match": {"server_id": s["id"], "is_deleted": False}}, {"$group": {"_id": None, "total": {"$sum": "$size"}}}]
+        drive_s = await db.drive_files.aggregate(drive_pipe).to_list(1)
+        s["drive_storage_used"] = drive_s[0]["total"] if drive_s else 0
+    return servers
+
+# ─── WEBSOCKET ───
+@app.websocket("/ws/{token}")
+async def websocket_endpoint(websocket: WebSocket, token: str):
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload["sub"]
+    except jwt.InvalidTokenError:
+        await websocket.close(code=4001)
+        return
+
+    await manager.connect(user_id, websocket)
+    await db.users.update_one({"id": user_id}, {"$set": {"status": "online", "last_active": datetime.now(timezone.utc).isoformat()}})
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            msg_type = data.get("type")
+
+            if msg_type == "subscribe_channel":
+                manager.subscribe_channel(user_id, data["channel_id"])
+            elif msg_type == "unsubscribe_channel":
+                manager.unsubscribe_channel(user_id, data["channel_id"])
+            elif msg_type == "subscribe_dm":
+                manager.subscribe_dm(user_id, data["conversation_id"])
+            elif msg_type == "join_voice":
+                manager.join_voice(user_id, data["channel_id"])
+                participants = list(manager.get_voice_participants(data["channel_id"]))
+                await manager.broadcast_channel(data["channel_id"], {
+                    "type": "voice_state_update",
+                    "channel_id": data["channel_id"],
+                    "participants": participants,
+                    "user_joined": user_id
+                })
+            elif msg_type == "leave_voice":
+                manager.leave_voice(user_id, data["channel_id"])
+                participants = list(manager.get_voice_participants(data["channel_id"]))
+                await manager.broadcast_channel(data["channel_id"], {
+                    "type": "voice_state_update",
+                    "channel_id": data["channel_id"],
+                    "participants": participants,
+                    "user_left": user_id
+                })
+            elif msg_type == "webrtc_signal":
+                await manager.send_personal(data["target_user_id"], {
+                    "type": "webrtc_signal",
+                    "signal": data["signal"],
+                    "from_user_id": user_id
+                })
+            elif msg_type == "typing":
+                target = data.get("conversation_id") or data.get("channel_id")
+                if data.get("conversation_id"):
+                    await manager.broadcast_dm(target, {"type": "typing", "user_id": user_id, "conversation_id": target}, exclude=user_id)
+                else:
+                    await manager.broadcast_channel(target, {"type": "typing", "user_id": user_id, "channel_id": target}, exclude=user_id)
+            elif msg_type == "heartbeat":
+                await db.users.update_one({"id": user_id}, {"$set": {"last_active": datetime.now(timezone.utc).isoformat()}})
+                await websocket.send_json({"type": "heartbeat_ack"})
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        manager.disconnect(user_id)
+        await db.users.update_one({"id": user_id}, {"$set": {"last_active": datetime.now(timezone.utc).isoformat()}})
+
+# ─── STARTUP ───
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("username_lower", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.conversations.create_index("id", unique=True)
+    await db.conversations.create_index("participants")
+    await db.messages.create_index("conversation_id")
+    await db.messages.create_index("created_at")
+    await db.messages.create_index("id", unique=True)
+    await db.servers.create_index("id", unique=True)
+    await db.channels.create_index("id", unique=True)
+    await db.channels.create_index("server_id")
+    await db.channel_messages.create_index("channel_id")
+    await db.channel_messages.create_index("created_at")
+    await db.server_members.create_index([("server_id", 1), ("user_id", 1)], unique=True)
+    await db.invites.create_index("code", unique=True)
+    await db.files.create_index("id", unique=True)
+    await db.drive_files.create_index("id", unique=True)
+    await db.drive_files.create_index("server_id")
+    await db.login_attempts.create_index("identifier")
+
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@securecomm.local")
+    admin_password = os.environ.get("ADMIN_PASSWORD", "SecureAdmin2024!")
+    existing = await db.users.find_one({"email": admin_email})
+    if not existing:
+        admin_id = str(uuid.uuid4())
+        await db.users.insert_one({
+            "id": admin_id,
+            "username": "admin",
+            "username_lower": "admin",
+            "email": admin_email,
+            "password_hash": hash_password(admin_password),
+            "display_name": "Admin",
+            "avatar_url": None,
+            "about": "System Administrator",
+            "status": "online",
+            "status_message": None,
+            "status_message_expires": None,
+            "totp_enabled": False,
+            "totp_secret": None,
+            "role": "admin",
+            "friends": [],
+            "blocked": [],
+            "friend_requests_sent": [],
+            "friend_requests_received": [],
+            "storage_used_bytes": 0,
+            "storage_limit_bytes": 5 * 1024 * 1024 * 1024,
+            "last_active": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+        logger.info(f"Admin user created: {admin_email}")
+    elif not verify_password(admin_password, existing["password_hash"]):
+        await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
+
+    try:
+        init_storage()
+    except Exception as e:
+        logger.warning(f"Storage init failed: {e}")
+
+    await db.stats.update_one({"key": "global"}, {"$setOnInsert": {"messages_sent": 0, "total_servers": 0}}, upsert=True)
+    logger.info("SecureComm API started successfully")
+
+@app.on_event("shutdown")
+async def shutdown():
+    client.close()
+
 app.include_router(api_router)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
     allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
