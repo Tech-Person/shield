@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../lib/api';
-import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon, Sticker } from 'lucide-react';
+import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon, Sticker, CheckCheck } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
@@ -27,6 +27,7 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
   const [gifPickerOpen, setGifPickerOpen] = useState(false);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const [typingUsers, setTypingUsers] = useState([]);
+  const [readReceipts, setReadReceipts] = useState([]);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -52,8 +53,35 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
     setSearchOpen(false);
     setSearchResults([]);
     setThreadMsg(null);
+    setReadReceipts([]);
     loadMessages();
   }, [targetId, loadMessages]);
+
+  // Send read receipt when messages change
+  useEffect(() => {
+    if (messages.length === 0 || !targetId) return;
+    const lastMsg = messages[messages.length - 1];
+    if (lastMsg.sender_id === user?.id) return;
+    const endpoint = isChannel
+      ? `/channels/${channel.id}/read`
+      : `/dm/${conversation.id}/read`;
+    api.post(endpoint, { last_message_id: lastMsg.id }).catch(() => {});
+  }, [messages, targetId, isChannel, channel, conversation, user]);
+
+  // Load read receipts
+  useEffect(() => {
+    if (!targetId) return;
+    const loadReceipts = async () => {
+      try {
+        const endpoint = isChannel
+          ? `/channels/${channel.id}/read-receipts`
+          : `/dm/${conversation.id}/read-receipts`;
+        const { data } = await api.get(endpoint);
+        setReadReceipts(data);
+      } catch {}
+    };
+    loadReceipts();
+  }, [targetId, isChannel, channel, conversation]);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
@@ -82,6 +110,11 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
             const entry = { user_id: data.user_id };
             setTimeout(() => setTypingUsers(p => p.filter(t => t.user_id !== data.user_id)), 3000);
             return [...prev, entry];
+          });
+        } else if (data.type === 'read_receipt') {
+          setReadReceipts(prev => {
+            const filtered = prev.filter(r => r.user_id !== data.user_id);
+            return [...filtered, { user_id: data.user_id, username: data.username, last_message_id: data.last_message_id, read_at: data.read_at }];
           });
         }
       } catch {}
@@ -376,6 +409,32 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
                           <span>{msg.thread_count} {msg.thread_count === 1 ? 'reply' : 'replies'}</span>
                         </button>
                       )}
+
+                      {/* Read receipts — show on last message from current user */}
+                      {msg.sender_id === user?.id && (() => {
+                        const readers = readReceipts.filter(r =>
+                          r.user_id !== user?.id && r.last_message_id === msg.id
+                        );
+                        const isNextFromSame = messages[i + 1]?.sender_id === user?.id;
+                        if (readers.length === 0 && !isNextFromSame) {
+                          return (
+                            <div className="flex items-center gap-1 mt-1" data-testid={`read-receipt-${msg.id}`}>
+                              <CheckCheck className="w-3 h-3 text-slate-600" />
+                              <span className="text-[10px] text-slate-600">Sent</span>
+                            </div>
+                          );
+                        }
+                        if (readers.length > 0) {
+                          const names = readers.map(r => r.username).join(', ');
+                          return (
+                            <div className="flex items-center gap-1 mt-1" data-testid={`read-receipt-${msg.id}`}>
+                              <CheckCheck className="w-3 h-3 text-emerald-500" />
+                              <span className="text-[10px] text-slate-500">Seen by {names}</span>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
 
                       {/* Action buttons (hover) */}
                       <div className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5 mt-1">

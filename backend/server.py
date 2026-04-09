@@ -713,7 +713,12 @@ async def update_server(server_id: str, data: ServerUpdate, request: Request):
     if not server:
         raise HTTPException(404, "Server not found")
     if server["owner_id"] != user["id"]:
-        raise HTTPException(403, "Only the owner can update server settings")
+        member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]}, {"_id": 0})
+        if not member:
+            raise HTTPException(403, "Not a member")
+        member_perms = compute_member_permissions(server, member)
+        if not has_permission(member_perms, Permissions.MANAGE_SERVER):
+            raise HTTPException(403, "No permission to manage server")
     updates = {k: v for k, v in data.model_dump(exclude_unset=True).items()}
     if "storage_limit_gb" in updates:
         new_limit = int(updates.pop("storage_limit_gb") * 1024 * 1024 * 1024)
@@ -746,6 +751,10 @@ async def create_invite(server_id: str, data: InviteCreate, request: Request):
     member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]}, {"_id": 0})
     if not member:
         raise HTTPException(403, "Not a member")
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    member_perms = compute_member_permissions(server, member) if server else 0
+    if not has_permission(member_perms, Permissions.CREATE_INVITE):
+        raise HTTPException(403, "No permission to create invites")
     code = str(uuid.uuid4())[:8]
     invite = {
         "id": str(uuid.uuid4()),
@@ -936,6 +945,78 @@ async def get_channel_messages(channel_id: str, request: Request, before: Option
     return messages
 
 # ─── REACTIONS (DM & Channel) ───
+
+# ─── READ RECEIPTS ───
+@api_router.post("/channels/{channel_id}/read")
+async def mark_channel_read(channel_id: str, request: Request):
+    user = await get_current_user(request)
+    body = await request.json()
+    last_message_id = body.get("last_message_id")
+    if not last_message_id:
+        raise HTTPException(400, "last_message_id required")
+    channel = await db.channels.find_one({"id": channel_id}, {"_id": 0})
+    if not channel:
+        raise HTTPException(404, "Channel not found")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.read_receipts.update_one(
+        {"channel_id": channel_id, "user_id": user["id"]},
+        {"$set": {"last_message_id": last_message_id, "read_at": now, "user_id": user["id"], "username": user["username"], "channel_id": channel_id}},
+        upsert=True
+    )
+    await manager.broadcast_channel(channel_id, {
+        "type": "read_receipt",
+        "channel_id": channel_id,
+        "user_id": user["id"],
+        "username": user["username"],
+        "last_message_id": last_message_id,
+        "read_at": now,
+    }, exclude=user["id"])
+    return {"message": "Marked as read"}
+
+@api_router.get("/channels/{channel_id}/read-receipts")
+async def get_channel_read_receipts(channel_id: str, request: Request):
+    user = await get_current_user(request)
+    receipts = await db.read_receipts.find({"channel_id": channel_id}, {"_id": 0}).to_list(200)
+    return receipts
+
+@api_router.post("/dm/{conversation_id}/read")
+async def mark_dm_read(conversation_id: str, request: Request):
+    user = await get_current_user(request)
+    body = await request.json()
+    last_message_id = body.get("last_message_id")
+    if not last_message_id:
+        raise HTTPException(400, "last_message_id required")
+    conv = await db.conversations.find_one({"id": conversation_id, "participants": user["id"]}, {"_id": 0})
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+    now = datetime.now(timezone.utc).isoformat()
+    await db.read_receipts.update_one(
+        {"conversation_id": conversation_id, "user_id": user["id"]},
+        {"$set": {"last_message_id": last_message_id, "read_at": now, "user_id": user["id"], "username": user["username"], "conversation_id": conversation_id}},
+        upsert=True
+    )
+    for pid in conv["participants"]:
+        if pid != user["id"]:
+            await manager.send_personal(pid, {
+                "type": "read_receipt",
+                "conversation_id": conversation_id,
+                "user_id": user["id"],
+                "username": user["username"],
+                "last_message_id": last_message_id,
+                "read_at": now,
+            })
+    return {"message": "Marked as read"}
+
+@api_router.get("/dm/{conversation_id}/read-receipts")
+async def get_dm_read_receipts(conversation_id: str, request: Request):
+    user = await get_current_user(request)
+    conv = await db.conversations.find_one({"id": conversation_id, "participants": user["id"]}, {"_id": 0})
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+    receipts = await db.read_receipts.find({"conversation_id": conversation_id}, {"_id": 0}).to_list(50)
+    return receipts
+
+# ─── REACTIONS (DM & Channel) ───
 @api_router.post("/messages/{message_id}/reactions")
 async def add_dm_reaction(message_id: str, data: ReactionAdd, request: Request):
     user = await get_current_user(request)
@@ -983,6 +1064,10 @@ async def add_channel_reaction(message_id: str, data: ReactionAdd, request: Requ
     member = await db.server_members.find_one({"server_id": msg["server_id"], "user_id": user["id"]})
     if not member:
         raise HTTPException(403, "Not a member")
+    server = await db.servers.find_one({"id": msg["server_id"]}, {"_id": 0})
+    member_perms = compute_member_permissions(server, member) if server else 0
+    if not has_permission(member_perms, Permissions.ADD_REACTIONS):
+        raise HTTPException(403, "No permission to add reactions")
     await db.reactions.update_one(
         {"message_id": message_id, "emoji": data.emoji, "user_id": user["id"]},
         {"$setOnInsert": {"id": str(uuid.uuid4()), "message_id": message_id, "emoji": data.emoji, "user_id": user["id"], "username": user["username"], "created_at": datetime.now(timezone.utc).isoformat()}},
@@ -1055,6 +1140,10 @@ async def reply_channel_thread(message_id: str, data: ThreadReply, request: Requ
     member = await db.server_members.find_one({"server_id": parent["server_id"], "user_id": user["id"]})
     if not member:
         raise HTTPException(403, "Not a member")
+    server = await db.servers.find_one({"id": parent["server_id"]}, {"_id": 0})
+    member_perms = compute_member_permissions(server, member) if server else 0
+    if not has_permission(member_perms, Permissions.SEND_MESSAGES_IN_THREADS):
+        raise HTTPException(403, "No permission to send messages in threads")
     reply_id = str(uuid.uuid4())
     encrypted_content = encrypt_text(data.content)
     reply = {
@@ -2314,6 +2403,8 @@ async def startup():
     await db.login_attempts.create_index("identifier")
     # Clear any stale login lockouts on restart
     await db.login_attempts.delete_many({})
+    await db.read_receipts.create_index([("channel_id", 1), ("user_id", 1)], unique=True, sparse=True)
+    await db.read_receipts.create_index([("conversation_id", 1), ("user_id", 1)], unique=True, sparse=True)
     await db.reactions.create_index("message_id")
     await db.reactions.create_index([("message_id", 1), ("emoji", 1), ("user_id", 1)], unique=True)
     await db.thread_replies.create_index("parent_message_id")
