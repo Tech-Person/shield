@@ -1144,6 +1144,225 @@ async def check_for_updates(request: Request):
         "release_url": "https://github.com/securecomm/securecomm/releases",
         "changelog": "Initial release with encrypted messaging, servers, channels, voice/video, and share drives."
     }
+
+# ─── GIF SEARCH (GIPHY PROXY) ───
+import httpx
+
+@api_router.get("/gifs/trending")
+async def gif_trending(request: Request, limit: int = 20, offset: int = 0):
+    await get_current_user(request)
+    giphy_key = os.environ.get("GIPHY_API_KEY", "")
+    if not giphy_key:
+        raise HTTPException(503, "GIF service not configured")
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            "https://api.giphy.com/v1/gifs/trending",
+            params={"api_key": giphy_key, "limit": min(limit, 50), "offset": offset, "rating": "pg-13"},
+            timeout=10
+        )
+        if resp.status_code != 200:
+            raise HTTPException(502, "GIF service error")
+        data = resp.json()
+    return {"gifs": [_format_gif(g) for g in data.get("data", [])], "pagination": data.get("pagination", {})}
+
+@api_router.get("/gifs/search")
+async def gif_search(request: Request, q: str, limit: int = 20, offset: int = 0):
+    await get_current_user(request)
+    giphy_key = os.environ.get("GIPHY_API_KEY", "")
+    if not giphy_key:
+        raise HTTPException(503, "GIF service not configured")
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            "https://api.giphy.com/v1/gifs/search",
+            params={"api_key": giphy_key, "q": q, "limit": min(limit, 50), "offset": offset, "rating": "pg-13"},
+            timeout=10
+        )
+        if resp.status_code != 200:
+            raise HTTPException(502, "GIF service error")
+        data = resp.json()
+    return {"gifs": [_format_gif(g) for g in data.get("data", [])], "pagination": data.get("pagination", {})}
+
+def _format_gif(g):
+    images = g.get("images", {})
+    return {
+        "id": g.get("id"),
+        "title": g.get("title", ""),
+        "url": images.get("original", {}).get("url", ""),
+        "preview": images.get("fixed_height_small", {}).get("url", "") or images.get("preview_gif", {}).get("url", ""),
+        "width": images.get("fixed_height_small", {}).get("width", "200"),
+        "height": images.get("fixed_height_small", {}).get("height", "150"),
+        "original_width": images.get("original", {}).get("width", "480"),
+        "original_height": images.get("original", {}).get("height", "360"),
+    }
+
+# ─── PASSKEY / WEBAUTHN ───
+from webauthn import generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response
+from webauthn.helpers.structs import AuthenticatorSelectionCriteria, UserVerificationRequirement, ResidentKeyRequirement, PublicKeyCredentialDescriptor
+from webauthn.helpers import bytes_to_base64url, base64url_to_bytes
+
+WEBAUTHN_RP_ID = os.environ.get("WEBAUTHN_RP_ID", "localhost")
+WEBAUTHN_RP_NAME = "SecureComm"
+WEBAUTHN_ORIGIN = os.environ.get("WEBAUTHN_ORIGIN", "http://localhost:3000")
+
+@api_router.post("/auth/passkey/register/begin")
+async def begin_passkey_registration(request: Request):
+    user = await get_current_user(request)
+    existing_creds = await db.passkey_credentials.find({"user_id": user["id"]}, {"_id": 0}).to_list(20)
+    exclude = []
+    for cred in existing_creds:
+        exclude.append(PublicKeyCredentialDescriptor(id=base64url_to_bytes(cred["credential_id"])))
+
+    options = generate_registration_options(
+        rp_id=WEBAUTHN_RP_ID,
+        rp_name=WEBAUTHN_RP_NAME,
+        user_id=user["id"].encode(),
+        user_name=user["username"],
+        user_display_name=user.get("display_name", user["username"]),
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.PREFERRED,
+            user_verification=UserVerificationRequirement.PREFERRED,
+        ),
+        exclude_credentials=exclude,
+        timeout=60000,
+    )
+    challenge_b64 = bytes_to_base64url(options.challenge)
+    await db.passkey_challenges.insert_one({
+        "user_id": user["id"],
+        "challenge": challenge_b64,
+        "type": "registration",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    return {
+        "challenge": challenge_b64,
+        "rp": {"id": options.rp.id, "name": options.rp.name},
+        "user": {"id": bytes_to_base64url(options.user.id), "name": options.user.name, "displayName": options.user.display_name},
+        "pubKeyCredParams": [{"type": "public-key", "alg": p.alg} for p in options.pub_key_cred_params],
+        "timeout": options.timeout,
+        "attestation": options.attestation,
+        "excludeCredentials": [{"type": "public-key", "id": bytes_to_base64url(e.id)} for e in exclude],
+        "authenticatorSelection": {"residentKey": "preferred", "userVerification": "preferred"}
+    }
+
+@api_router.post("/auth/passkey/register/complete")
+async def complete_passkey_registration(request: Request):
+    user = await get_current_user(request)
+    body = await request.json()
+    challenge_doc = await db.passkey_challenges.find_one({"user_id": user["id"], "type": "registration"}, {"_id": 0})
+    if not challenge_doc:
+        raise HTTPException(400, "No registration challenge found")
+    await db.passkey_challenges.delete_many({"user_id": user["id"], "type": "registration"})
+
+    try:
+        verification = verify_registration_response(
+            credential=body["credential"],
+            expected_challenge=base64url_to_bytes(challenge_doc["challenge"]),
+            expected_origin=WEBAUTHN_ORIGIN,
+            expected_rp_id=WEBAUTHN_RP_ID,
+        )
+    except Exception as e:
+        raise HTTPException(400, f"Verification failed: {str(e)}")
+
+    cred_id_b64 = bytes_to_base64url(verification.credential_id)
+    pub_key_b64 = bytes_to_base64url(verification.credential_public_key)
+    await db.passkey_credentials.insert_one({
+        "id": str(uuid.uuid4()),
+        "user_id": user["id"],
+        "credential_id": cred_id_b64,
+        "public_key": pub_key_b64,
+        "sign_count": verification.sign_count,
+        "name": body.get("name", "Passkey"),
+        "created_at": datetime.now(timezone.utc).isoformat()
+    })
+    return {"message": "Passkey registered successfully"}
+
+@api_router.post("/auth/passkey/authenticate/begin")
+async def begin_passkey_auth(request: Request):
+    body = await request.json()
+    username = body.get("username")
+    user = await db.users.find_one({"username_lower": username.lower()}, {"_id": 0}) if username else None
+    creds = []
+    allow_creds = []
+    if user:
+        creds = await db.passkey_credentials.find({"user_id": user["id"]}, {"_id": 0}).to_list(20)
+        allow_creds = [PublicKeyCredentialDescriptor(id=base64url_to_bytes(c["credential_id"])) for c in creds]
+    if user and not creds:
+        raise HTTPException(404, "No passkeys registered for this user")
+
+    options = generate_authentication_options(
+        rp_id=WEBAUTHN_RP_ID,
+        allow_credentials=allow_creds,
+        user_verification=UserVerificationRequirement.PREFERRED,
+        timeout=120000,
+    )
+    challenge_b64 = bytes_to_base64url(options.challenge)
+    if user:
+        await db.passkey_challenges.insert_one({
+            "user_id": user["id"],
+            "challenge": challenge_b64,
+            "type": "authentication",
+            "created_at": datetime.now(timezone.utc).isoformat()
+        })
+    return {
+        "challenge": challenge_b64,
+        "timeout": options.timeout,
+        "rpId": options.rp_id,
+        "userVerification": "preferred",
+        "allowCredentials": [{"type": "public-key", "id": bytes_to_base64url(c.id), "transports": ["internal"]} for c in allow_creds]
+    }
+
+@api_router.post("/auth/passkey/authenticate/complete")
+async def complete_passkey_auth(request: Request, response: Response):
+    body = await request.json()
+    username = body.get("username")
+    credential = body.get("credential")
+    user = await db.users.find_one({"username_lower": username.lower()}, {"_id": 0})
+    if not user:
+        raise HTTPException(401, "Invalid credentials")
+
+    challenge_doc = await db.passkey_challenges.find_one({"user_id": user["id"], "type": "authentication"}, {"_id": 0})
+    if not challenge_doc:
+        raise HTTPException(400, "No authentication challenge found")
+    await db.passkey_challenges.delete_many({"user_id": user["id"], "type": "authentication"})
+
+    cred_id = credential.get("id")
+    stored_cred = await db.passkey_credentials.find_one({"user_id": user["id"], "credential_id": cred_id}, {"_id": 0})
+    if not stored_cred:
+        raise HTTPException(401, "Credential not found")
+
+    try:
+        verification = verify_authentication_response(
+            credential=credential,
+            expected_challenge=base64url_to_bytes(challenge_doc["challenge"]),
+            expected_origin=WEBAUTHN_ORIGIN,
+            expected_rp_id=WEBAUTHN_RP_ID,
+            credential_public_key=base64url_to_bytes(stored_cred["public_key"]),
+            credential_current_sign_count=stored_cred["sign_count"],
+        )
+    except Exception as e:
+        raise HTTPException(401, f"Authentication failed: {str(e)}")
+
+    await db.passkey_credentials.update_one(
+        {"user_id": user["id"], "credential_id": cred_id},
+        {"$set": {"sign_count": verification.new_sign_count}}
+    )
+    await db.users.update_one({"id": user["id"]}, {"$set": {"status": "online", "last_active": datetime.now(timezone.utc).isoformat()}})
+    access = create_access_token(user["id"], user["username"])
+    refresh = create_refresh_token(user["id"])
+    set_auth_cookies(response, access, refresh)
+    return {"user": sanitize_user(user), "access_token": access}
+
+@api_router.get("/auth/passkeys")
+async def list_passkeys(request: Request):
+    user = await get_current_user(request)
+    creds = await db.passkey_credentials.find({"user_id": user["id"]}, {"_id": 0}).to_list(20)
+    return creds
+
+@api_router.delete("/auth/passkeys/{credential_id}")
+async def delete_passkey(credential_id: str, request: Request):
+    user = await get_current_user(request)
+    await db.passkey_credentials.delete_one({"user_id": user["id"], "credential_id": credential_id})
+    return {"message": "Passkey removed"}
+
 @api_router.post("/servers/{server_id}/roles")
 async def create_role(server_id: str, data: RoleCreate, request: Request):
     user = await get_current_user(request)
@@ -1465,6 +1684,8 @@ async def startup():
     await db.reactions.create_index("message_id")
     await db.reactions.create_index([("message_id", 1), ("emoji", 1), ("user_id", 1)], unique=True)
     await db.thread_replies.create_index("parent_message_id")
+    await db.passkey_credentials.create_index([("user_id", 1), ("credential_id", 1)], unique=True)
+    await db.passkey_challenges.create_index("user_id")
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@securecomm.local")
     admin_password = os.environ.get("ADMIN_PASSWORD", "SecureAdmin2024!")

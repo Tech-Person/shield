@@ -24,6 +24,17 @@ export function AuthProvider({ children }) {
     ws.onclose = () => {
       clearInterval(heartbeatRef.current);
     };
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if ((data.type === 'new_message' || data.type === 'channel_message') && Notification?.permission === 'granted') {
+          const msg = data.message;
+          if (document.hidden && msg.sender_username) {
+            new Notification(`${msg.sender_username}`, { body: msg.content?.substring(0, 100), icon: '/logo192.png', tag: msg.id });
+          }
+        }
+      } catch {}
+    };
     wsRef.current = ws;
     return ws;
   }, []);

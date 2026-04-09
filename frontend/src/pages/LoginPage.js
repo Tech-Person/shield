@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
-import { formatApiError } from '../lib/api';
-import { Shield, Eye, EyeOff } from 'lucide-react';
+import api, { formatApiError } from '../lib/api';
+import { Shield, Eye, EyeOff, Fingerprint } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
+import { arrayBufferToBase64url, base64urlToArrayBuffer } from '../lib/webauthn';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -13,6 +14,7 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [passkeyLoading, setPasskeyLoading] = useState(false);
   const [requires2FA, setRequires2FA] = useState(false);
   const [tempToken, setTempToken] = useState('');
   const [totpCode, setTotpCode] = useState('');
@@ -49,6 +51,50 @@ export default function LoginPage() {
       setError(formatApiError(err.response?.data?.detail) || err.message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handlePasskeyLogin = async () => {
+    setError('');
+    setPasskeyLoading(true);
+    try {
+      // Start authentication - username optional for discoverable credentials
+      const { data: options } = await api.post('/auth/passkey/authenticate/begin', { username: email || null });
+      const publicKey = {
+        challenge: base64urlToArrayBuffer(options.challenge),
+        timeout: options.timeout,
+        rpId: options.rpId,
+        userVerification: options.userVerification,
+        allowCredentials: (options.allowCredentials || []).map(c => ({
+          type: c.type,
+          id: base64urlToArrayBuffer(c.id),
+          transports: c.transports
+        }))
+      };
+      const credential = await navigator.credentials.get({ publicKey });
+      const credData = {
+        id: arrayBufferToBase64url(credential.rawId),
+        rawId: arrayBufferToBase64url(credential.rawId),
+        type: credential.type,
+        response: {
+          authenticatorData: arrayBufferToBase64url(credential.response.authenticatorData),
+          clientDataJSON: arrayBufferToBase64url(credential.response.clientDataJSON),
+          signature: arrayBufferToBase64url(credential.response.signature),
+          userHandle: credential.response.userHandle ? arrayBufferToBase64url(credential.response.userHandle) : null
+        }
+      };
+      const { data } = await api.post('/auth/passkey/authenticate/complete', {
+        username: email,
+        credential: credData
+      });
+      if (data.user && data.access_token) {
+        window.location.href = '/app';
+      }
+    } catch (err) {
+      const msg = err?.response?.data?.detail || err?.message || 'Passkey authentication failed';
+      setError(typeof msg === 'string' ? msg : 'Passkey authentication failed');
+    } finally {
+      setPasskeyLoading(false);
     }
   };
 
@@ -116,6 +162,23 @@ export default function LoginPage() {
                 data-testid="login-submit-btn"
               >
                 {loading ? 'Signing in...' : 'Sign In'}
+              </Button>
+
+              <div className="relative my-2">
+                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-white/5" /></div>
+                <div className="relative flex justify-center text-xs"><span className="bg-slate-900/80 px-3 text-slate-500">or</span></div>
+              </div>
+
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full border-slate-700 text-slate-300 hover:bg-slate-800 hover:text-white h-11"
+                onClick={handlePasskeyLogin}
+                disabled={passkeyLoading}
+                data-testid="login-passkey-btn"
+              >
+                <Fingerprint className="w-4 h-4 mr-2" />
+                {passkeyLoading ? 'Authenticating...' : 'Sign in with Passkey'}
               </Button>
             </form>
           ) : (

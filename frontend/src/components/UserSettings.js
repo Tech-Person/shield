@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import api from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
-import { X, Shield, Key, User, Bell, Monitor } from 'lucide-react';
+import { X, Shield, Key, User, Bell, Monitor, Fingerprint, Trash2 } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Button } from '../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Switch } from '../components/ui/switch';
+import { arrayBufferToBase64url, base64urlToArrayBuffer } from '../lib/webauthn';
 
 export default function UserSettings({ onClose }) {
   const { user, setUser } = useAuth();
@@ -19,6 +20,21 @@ export default function UserSettings({ onClose }) {
   const [show2FA, setShow2FA] = useState(false);
   const [qrCode, setQrCode] = useState('');
   const [totpCode, setTotpCode] = useState('');
+  const [passkeys, setPasskeys] = useState([]);
+  const [passkeyName, setPasskeyName] = useState('');
+  const [registeringPasskey, setRegisteringPasskey] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(Notification?.permission === 'granted');
+
+  useEffect(() => {
+    loadPasskeys();
+  }, []);
+
+  const loadPasskeys = async () => {
+    try {
+      const { data } = await api.get('/auth/passkeys');
+      setPasskeys(data);
+    } catch {}
+  };
 
   const handleSaveProfile = async () => {
     setSaving(true);
@@ -141,6 +157,111 @@ export default function UserSettings({ onClose }) {
               <Key className="w-4 h-4 mr-2" /> Setup 2FA
             </Button>
           )}
+        </section>
+
+        {/* Passkeys */}
+        <section className="mb-8">
+          <h3 className="text-lg font-medium text-slate-100 mb-4 flex items-center gap-2 font-['Outfit']">
+            <Fingerprint className="w-5 h-5 text-emerald-500" /> Passkeys
+          </h3>
+          <p className="text-sm text-slate-400 mb-4 font-['IBM_Plex_Sans']">
+            Use biometrics or security keys as an alternative to passwords.
+          </p>
+          {/* Existing passkeys */}
+          {passkeys.length > 0 && (
+            <div className="space-y-2 mb-4">
+              {passkeys.map(pk => (
+                <div key={pk.id} className="flex items-center justify-between px-4 py-3 bg-slate-900/50 rounded border border-white/5">
+                  <div className="flex items-center gap-3">
+                    <Fingerprint className="w-4 h-4 text-emerald-500" />
+                    <div>
+                      <p className="text-sm text-slate-200">{pk.name}</p>
+                      <p className="text-xs text-slate-500 font-mono">Added {new Date(pk.created_at).toLocaleDateString()}</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={async () => { await api.delete(`/auth/passkeys/${pk.credential_id}`); loadPasskeys(); }}
+                    className="p-2 text-slate-400 hover:text-red-400 rounded"
+                    data-testid={`delete-passkey-${pk.id}`}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {/* Register new passkey */}
+          <div className="flex items-end gap-2">
+            <div>
+              <Label className="text-slate-300 text-sm">Passkey Name</Label>
+              <Input value={passkeyName} onChange={e => setPasskeyName(e.target.value)} placeholder="e.g. MacBook Touch ID" className="bg-slate-900 border-white/10 text-slate-100 mt-1.5 w-64" data-testid="passkey-name-input" />
+            </div>
+            <Button
+              onClick={async () => {
+                setRegisteringPasskey(true);
+                try {
+                  const { data: options } = await api.post('/auth/passkey/register/begin');
+                  const publicKey = {
+                    challenge: base64urlToArrayBuffer(options.challenge),
+                    rp: options.rp,
+                    user: { ...options.user, id: base64urlToArrayBuffer(options.user.id) },
+                    pubKeyCredParams: options.pubKeyCredParams,
+                    timeout: options.timeout,
+                    attestation: options.attestation || 'none',
+                    excludeCredentials: (options.excludeCredentials || []).map(c => ({ ...c, id: base64urlToArrayBuffer(c.id) })),
+                    authenticatorSelection: options.authenticatorSelection
+                  };
+                  const credential = await navigator.credentials.create({ publicKey });
+                  const credData = {
+                    id: arrayBufferToBase64url(credential.rawId),
+                    rawId: arrayBufferToBase64url(credential.rawId),
+                    type: credential.type,
+                    response: {
+                      attestationObject: arrayBufferToBase64url(credential.response.attestationObject),
+                      clientDataJSON: arrayBufferToBase64url(credential.response.clientDataJSON),
+                    }
+                  };
+                  await api.post('/auth/passkey/register/complete', { credential: credData, name: passkeyName || 'Passkey' });
+                  setPasskeyName('');
+                  loadPasskeys();
+                } catch (err) {
+                  console.error('Passkey registration error:', err);
+                }
+                setRegisteringPasskey(false);
+              }}
+              disabled={registeringPasskey}
+              className="bg-emerald-500 text-slate-950 hover:bg-emerald-400 h-10"
+              data-testid="register-passkey-btn"
+            >
+              <Fingerprint className="w-4 h-4 mr-2" />
+              {registeringPasskey ? 'Registering...' : 'Add Passkey'}
+            </Button>
+          </div>
+        </section>
+
+        {/* Notifications */}
+        <section className="mb-8">
+          <h3 className="text-lg font-medium text-slate-100 mb-4 flex items-center gap-2 font-['Outfit']">
+            <Bell className="w-5 h-5 text-emerald-500" /> Notifications
+          </h3>
+          <div className="flex items-center justify-between p-4 bg-slate-900/50 rounded border border-white/5 max-w-sm">
+            <div>
+              <p className="text-sm text-slate-200">Desktop Notifications</p>
+              <p className="text-xs text-slate-500">Get notified of new messages</p>
+            </div>
+            <Switch
+              checked={notificationsEnabled}
+              onCheckedChange={async (checked) => {
+                if (checked) {
+                  const perm = await Notification.requestPermission();
+                  setNotificationsEnabled(perm === 'granted');
+                } else {
+                  setNotificationsEnabled(false);
+                }
+              }}
+              data-testid="notifications-toggle"
+            />
+          </div>
         </section>
       </div>
     </div>

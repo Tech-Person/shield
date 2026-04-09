@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../lib/api';
-import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, Reply } from 'lucide-react';
+import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
+import GifPicker from './GifPicker';
 
 const COMMON_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '✅', '❌', '💯', '🙏'];
 
@@ -22,9 +23,13 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
   const [threadReplies, setThreadReplies] = useState([]);
   const [threadReply, setThreadReply] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [gifPickerOpen, setGifPickerOpen] = useState(false);
+  const [typingUsers, setTypingUsers] = useState([]);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const fileInputRef = useRef(null);
+  const typingTimeoutRef = useRef(null);
+  const lastTypingSentRef = useRef(0);
 
   const targetId = channel?.id || conversation?.id;
   const isChannel = !!channel;
@@ -68,6 +73,14 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
           setMessages(prev => prev.filter(m => m.id !== data.message_id));
         } else if (data.type === 'thread_reply' && threadMsg?.id === data.parent_message_id) {
           setThreadReplies(prev => [...prev, data.reply]);
+        } else if (data.type === 'typing' && data.user_id !== user.id) {
+          setTypingUsers(prev => {
+            const existing = prev.find(t => t.user_id === data.user_id);
+            if (existing) return prev;
+            const entry = { user_id: data.user_id };
+            setTimeout(() => setTypingUsers(p => p.filter(t => t.user_id !== data.user_id)), 3000);
+            return [...prev, entry];
+          });
         }
       } catch {}
     };
@@ -88,8 +101,36 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
       const { data } = await api.post(endpoint, { content: newMessage });
       setMessages(prev => [...prev, { ...data, reactions: data.reactions || [], thread_count: data.thread_count || 0 }]);
       setNewMessage('');
+      setTypingUsers([]);
       inputRef.current?.focus();
     } catch {}
+  };
+
+  const handleGifSelect = async (gif) => {
+    try {
+      const content = `[gif](${gif.url})`;
+      const endpoint = isChannel ? `/channels/${channel.id}/messages` : `/dm/${conversation.id}/messages`;
+      const { data } = await api.post(endpoint, { content });
+      setMessages(prev => [...prev, { ...data, reactions: data.reactions || [], thread_count: data.thread_count || 0 }]);
+    } catch {}
+  };
+
+  const sendTypingIndicator = () => {
+    const now = Date.now();
+    if (now - lastTypingSentRef.current < 2000) return;
+    lastTypingSentRef.current = now;
+    const websocket = ws?.current;
+    if (websocket?.readyState === WebSocket.OPEN) {
+      const payload = isChannel
+        ? { type: 'typing', channel_id: channel?.id }
+        : { type: 'typing', conversation_id: conversation?.id };
+      try { websocket.send(JSON.stringify(payload)); } catch {}
+    }
+  };
+
+  const handleMessageInput = (e) => {
+    setNewMessage(e.target.value);
+    if (e.target.value.trim()) sendTypingIndicator();
   };
 
   const handleReaction = async (messageId, emoji) => {
@@ -291,7 +332,7 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
                           <button onClick={() => setEditingId(null)} className="text-slate-500 hover:text-slate-300 text-xs">Cancel</button>
                         </div>
                       ) : (
-                        <p className="text-sm text-slate-300 leading-relaxed break-words font-['IBM_Plex_Sans']">{msg.content}</p>
+                        <MessageContent content={msg.content} />
                       )}
 
                       {/* Reactions display */}
@@ -408,15 +449,37 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
         )}
       </div>
 
+      {/* Typing indicator */}
+      {typingUsers.length > 0 && (
+        <div className="px-4 py-1 flex items-center gap-2 border-t border-white/5" data-testid="typing-indicator">
+          <div className="flex gap-0.5">
+            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+            <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+          </div>
+          <span className="text-xs text-slate-500 font-['IBM_Plex_Sans']">Someone is typing...</span>
+        </div>
+      )}
+
+      {/* GIF picker */}
+      {gifPickerOpen && (
+        <div className="absolute bottom-20 left-16 z-50" data-testid="gif-picker-container">
+          <GifPicker onSelect={handleGifSelect} onClose={() => setGifPickerOpen(false)} />
+        </div>
+      )}
+
       {/* Message input */}
-      <div className="p-4 border-t border-white/5 flex-shrink-0">
+      <div className="p-4 border-t border-white/5 flex-shrink-0 relative">
         <form onSubmit={handleSend} className="flex items-center gap-2">
           <input type="file" ref={fileInputRef} onChange={handleFileUpload} className="hidden" data-testid="file-upload-input" />
           <button type="button" onClick={() => fileInputRef.current?.click()} className="p-2.5 text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-md transition-colors" disabled={uploading} data-testid="attach-file-btn">
             {uploading ? <Upload className="w-4 h-4 animate-pulse" /> : <Paperclip className="w-4 h-4" />}
           </button>
+          <button type="button" onClick={() => setGifPickerOpen(!gifPickerOpen)} className={`p-2.5 rounded-md transition-colors ${gifPickerOpen ? 'text-emerald-400 bg-emerald-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`} data-testid="gif-picker-btn">
+            <ImageIcon className="w-4 h-4" />
+          </button>
           <div className="flex-1 relative">
-            <Input ref={inputRef} value={newMessage} onChange={e => setNewMessage(e.target.value)} placeholder={`Message ${isChannel ? '#' : ''}${title}`} className="bg-slate-900 border-white/10 text-slate-100 pr-10 focus:ring-1 focus:ring-emerald-500/50 font-['IBM_Plex_Sans']" data-testid="chat-message-input" />
+            <Input ref={inputRef} value={newMessage} onChange={handleMessageInput} placeholder={`Message ${isChannel ? '#' : ''}${title}`} className="bg-slate-900 border-white/10 text-slate-100 pr-10 focus:ring-1 focus:ring-emerald-500/50 font-['IBM_Plex_Sans']" data-testid="chat-message-input" />
           </div>
           <button type="submit" className="p-2.5 bg-emerald-500 text-slate-950 rounded-md hover:bg-emerald-400 transition-colors disabled:opacity-50" disabled={!newMessage.trim()} data-testid="chat-send-btn">
             <Send className="w-4 h-4" />
@@ -425,4 +488,26 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
       </div>
     </div>
   );
+}
+
+// Renders message content with inline GIF support
+function MessageContent({ content }) {
+  const gifMatch = content?.match(/^\[gif\]\((https?:\/\/[^\s)]+)\)$/);
+  if (gifMatch) {
+    return (
+      <div className="mt-1 max-w-sm">
+        <img src={gifMatch[1]} alt="GIF" className="rounded-lg max-h-64 w-auto" loading="lazy" data-testid="gif-message-image" />
+      </div>
+    );
+  }
+  // Check for image URLs
+  const imgMatch = content?.match(/^(https?:\/\/\S+\.(gif|png|jpg|jpeg|webp)(\?\S*)?)$/i);
+  if (imgMatch) {
+    return (
+      <div className="mt-1 max-w-sm">
+        <img src={imgMatch[1]} alt="Image" className="rounded-lg max-h-64 w-auto" loading="lazy" />
+      </div>
+    );
+  }
+  return <p className="text-sm text-slate-300 leading-relaxed break-words font-['IBM_Plex_Sans']">{content}</p>;
 }

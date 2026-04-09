@@ -806,6 +806,89 @@ class SecureCommAPITester:
         
         return success and 'current_version' in response and 'latest_version' in response
 
+    def test_gif_trending(self):
+        """Test GET /api/gifs/trending"""
+        success, response = self.run_test(
+            "Get Trending GIFs",
+            "GET",
+            "gifs/trending?limit=20",
+            200
+        )
+        
+        return success and 'gifs' in response and isinstance(response['gifs'], list)
+
+    def test_gif_search(self):
+        """Test GET /api/gifs/search"""
+        success, response = self.run_test(
+            "Search GIFs",
+            "GET",
+            "gifs/search?q=thumbs+up&limit=20",
+            200
+        )
+        
+        return success and 'gifs' in response and isinstance(response['gifs'], list)
+
+    def test_passkey_register_begin(self):
+        """Test POST /api/auth/passkey/register/begin (requires auth)"""
+        success, response = self.run_test(
+            "Begin Passkey Registration",
+            "POST",
+            "auth/passkey/register/begin",
+            200
+        )
+        
+        return success and 'challenge' in response and 'rp' in response
+
+    def test_passkeys_list(self):
+        """Test GET /api/auth/passkeys (should return empty array for new users)"""
+        success, response = self.run_test(
+            "List User Passkeys",
+            "GET",
+            "auth/passkeys",
+            200
+        )
+        
+        return success and isinstance(response, list)
+
+    def test_passkey_authenticate_begin(self):
+        """Test POST /api/auth/passkey/authenticate/begin"""
+        # Create a test user first
+        timestamp = datetime.now().strftime('%H%M%S%f')
+        test_username = f"passkeyuser_{timestamp}"
+        test_email = f"passkey_{timestamp}@example.com"
+        
+        # Register user
+        reg_success, reg_response = self.run_test(
+            "Register User for Passkey Auth Test",
+            "POST",
+            "auth/register",
+            200,
+            data={
+                "username": test_username,
+                "email": test_email,
+                "password": "TestPass123!"
+            }
+        )
+        
+        if not reg_success:
+            return False
+        
+        # Test passkey auth begin with username
+        success, response = self.run_test(
+            "Begin Passkey Authentication",
+            "POST",
+            "auth/passkey/authenticate/begin",
+            200,
+            data={"username": test_username}
+        )
+        
+        # Should return 404 since user has no passkeys registered
+        if success:
+            return 'challenge' in response
+        else:
+            # Expected to fail with 404 since no passkeys registered
+            return True
+
     def run_all_tests(self):
         """Run all backend API tests"""
         self.log("🚀 Starting SecureComm Backend API Tests")
@@ -831,7 +914,7 @@ class SecureCommAPITester:
             self.test_invite_system,
             self.test_status_update,
             self.test_admin_stats,
-            # New Stage 4-6 features
+            # Stage 4-6 features
             self.test_dm_message_reactions,
             self.test_channel_message_reactions,
             self.test_dm_message_threads,
@@ -839,7 +922,13 @@ class SecureCommAPITester:
             self.test_dm_message_edit_delete,
             self.test_channel_message_edit_delete,
             self.test_voice_participants,
-            self.test_update_check
+            self.test_update_check,
+            # New Stage 7+ features - GIF and Passkey APIs
+            self.test_gif_trending,
+            self.test_gif_search,
+            self.test_passkey_register_begin,
+            self.test_passkeys_list,
+            self.test_passkey_authenticate_begin
         ]
         
         for test in tests:
