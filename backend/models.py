@@ -86,6 +86,16 @@ class InviteCreate(BaseModel):
     max_uses: Optional[int] = None
     expires_hours: Optional[int] = 24
 
+class ReactionAdd(BaseModel):
+    emoji: str
+
+class ThreadReply(BaseModel):
+    content: str
+    attachments: Optional[List[str]] = []
+
+class MessageEdit(BaseModel):
+    content: str
+
 # Permission flags
 class Permissions:
     ADMINISTRATOR = 1 << 0

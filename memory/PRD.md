@@ -10,48 +10,29 @@ Build a privacy-focused Discord replacement with E2E encryption, servers, channe
 - **Encryption**: AES-256 (Fernet) for messages at rest
 - **Storage**: Emergent Object Storage for file uploads
 - **Auth**: JWT (httpOnly cookies) + 2FA (TOTP/Google Authenticator)
+- **Voice/Video**: WebRTC (P2P with STUN/TURN, quality up to 2160p/60fps)
 
 ## User Personas
 1. **Regular User**: Creates account, joins servers, chats, DMs friends
 2. **Server Admin/Owner**: Creates servers, manages channels/roles/permissions
 3. **System Admin**: Access admin dashboard, monitor stats, manage platform
 
-## Core Requirements
-- [x] User registration and login (email/password + JWT)
-- [x] 2FA setup/verify (TOTP with QR code)
-- [x] Friend system (add/remove/block by username)
-- [x] Direct Messages (1-on-1 + group DMs)
-- [x] Message encryption at rest (AES-256)
-- [x] DM search across encrypted messages
-- [x] Server creation and management
-- [x] Text and voice channels
-- [x] Role-based permissions system
-- [x] Channel messaging with slowmode
-- [x] Invite system (codes with expiry/max uses)
-- [x] Member management (kick/ban)
-- [x] Server share drive (file upload/download/delete)
-- [x] Storage limits (5GB user, 25GB server)
-- [x] User status (Online/Away/Busy/Invisible) with auto-AFK
-- [x] Custom status messages with expiration
-- [x] Admin dashboard with statistics
-- [x] WebSocket real-time messaging
-- [x] Dark "Secure Vault" UI theme
+## What's Been Implemented
 
-## What's Been Implemented (Apr 8, 2026)
-### Stage 1 - Auth & User Foundation ✅
+### Stage 1 - Auth & User Foundation (Apr 8, 2026) ✅
 - Registration, login, JWT auth with httpOnly cookies
 - 2FA (TOTP) setup, confirm, verify, disable
 - User profiles with display name, about, avatar
 - Status system with auto-AFK (10 min timeout)
 - Brute force protection (5 attempts = 15min lockout)
 
-### Stage 2 - Social & Messaging ✅
+### Stage 2 - Social & Messaging (Apr 8, 2026) ✅
 - Friend request/accept/reject/remove/block/unblock
 - DM conversations (1-on-1 and group)
 - Encrypted messages with search capability
 - Real-time message delivery via WebSocket
 
-### Stage 3 - Servers & Channels ✅
+### Stage 3 - Servers & Channels (Apr 8, 2026) ✅
 - Server CRUD with channels and roles
 - Text channels with slowmode enforcement
 - Voice channel stubs (UI ready)
@@ -60,26 +41,45 @@ Build a privacy-focused Discord replacement with E2E encryption, servers, channe
 - Server share drive with storage tracking
 - Admin dashboard with stats and charts
 
+### Stage 4 - Reactions, Threads, Edit/Delete (Apr 9, 2026) ✅
+- Emoji reactions on DM and channel messages (12 common emojis)
+- Threaded replies with thread panel UI
+- Message editing (own messages only)
+- Message deletion (own messages only)
+- File attachments in chat via object storage
+
+### Stage 5 - Voice/Video & Streaming (Apr 9, 2026) ✅
+- WebRTC voice channels with P2P connections
+- Video toggle with quality selector (480p-2160p, 30-60fps)
+- Screen sharing via getDisplayMedia
+- Mute/unmute, video on/off controls
+- Join/leave voice channel with participant tracking
+- STUN servers (Google's public STUN)
+
+### Stage 6 - Admin & Deployment (Apr 9, 2026) ✅
+- Admin dashboard with 8 stat cards + bar chart
+- Server listing with storage metrics
+- PWA manifest + service worker
+- Update check endpoint (/api/system/update-check)
+
 ## Prioritized Backlog
 
-### P0 (Critical - Next)
-- Voice/Video WebRTC implementation
-- Screen sharing (P2P up to 10 viewers, server relay fallback)
-- File attachments in messages (photo/video inline preview)
+### P0 (Next)
+- TURN server relay for NAT traversal (currently P2P only)
+- Server relay logging in admin console
+- Typing indicator display in chat
+- Passkey/WebAuthn support
 
 ### P1 (Important)
-- WebRTC signaling server for voice/video
-- Server relay logging in admin console
-- Video quality selector (up to 2160p/60fps)
-- Passkey/WebAuthn support
+- Debian deployment package
+- Native app skeletons (Electron/Tauri)
+- GitHub-based auto-update polling
 - Channel permission overrides
+- Message pinning
 
 ### P2 (Enhancement)
-- PWA manifest and service worker
-- Update check system (GitHub-based)
-- Debian deployment package skeleton
-- Native app skeletons (Electron/Tauri)
-- Message reactions and threading
-- Message editing and deletion
-- Typing indicators display
-- User search improvements
+- Rich text/markdown in messages
+- User profile popover cards
+- Server discovery / public servers
+- DM calling (voice/video in DMs)
+- Notification system (desktop + push)

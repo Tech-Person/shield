@@ -10,6 +10,7 @@ import FriendsList from '../components/FriendsList';
 import UserSettings from '../components/UserSettings';
 import ServerSettings from '../components/ServerSettings';
 import ShareDrive from '../components/ShareDrive';
+import VoiceChannel from '../components/VoiceChannel';
 import { Menu, X } from 'lucide-react';
 
 export default function MainApp() {
@@ -141,6 +142,7 @@ export default function MainApp() {
           onSelectDMs={handleSelectDMs}
           onSelectFriends={handleSelectFriends}
           onServerCreated={loadServers}
+          onOpenSettings={() => setShowSettings(true)}
         />
 
         {/* Channel / DM sidebar */}
@@ -175,6 +177,16 @@ export default function MainApp() {
           <ShareDrive server={serverData} />
         ) : activeView === 'friends' && !activeServer ? (
           <FriendsList onStartDM={(conv) => { setActiveConversation(conv); setActiveView('dms'); }} />
+        ) : activeServer && activeChannel && activeChannel.channel_type === 'voice' ? (
+          <div className="flex-1 flex min-h-0">
+            <VoiceChannel
+              channel={activeChannel}
+              server={serverData}
+              user={user}
+              ws={ws}
+            />
+            {showMembers && serverData && <MembersPanel server={serverData} />}
+          </div>
         ) : (activeView === 'dms' && activeConversation) || (activeServer && activeChannel) ? (
           <div className="flex-1 flex min-h-0">
             <ChatArea

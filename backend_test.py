@@ -20,6 +20,8 @@ class SecureCommAPITester:
         self.test_conversation_id = None
         self.test_friend_id = None
         self.test_invite_code = None
+        self.test_dm_message_id = None
+        self.test_channel_message_id = None
 
     def log(self, message):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
@@ -318,6 +320,8 @@ class SecureCommAPITester:
         if not success4:
             return False
             
+        self.test_dm_message_id = response4['id']  # Store message ID for reaction/thread tests
+            
         # Get DM messages
         success5, response5 = self.run_test(
             "Get DM Messages",
@@ -410,6 +414,8 @@ class SecureCommAPITester:
         )
         if not success2:
             return False
+            
+        self.test_channel_message_id = response2['id']  # Store message ID for reaction/thread tests
             
         # Get channel messages
         success3, response3 = self.run_test(
@@ -541,6 +547,265 @@ class SecureCommAPITester:
         
         return 'users_registered' in stats_data
 
+    def test_dm_message_reactions(self):
+        """Test DM message reactions (add/remove/list)"""
+        # Create a DM conversation and message for this test
+        timestamp1 = datetime.now().strftime('%H%M%S%f')
+        timestamp2 = datetime.now().strftime('%H%M%S%f') + "react"
+        
+        user1_data = {
+            "username": f"react1_{timestamp1}",
+            "email": f"react1_{timestamp1}@example.com",
+            "password": "TestPass123!"
+        }
+        user2_data = {
+            "username": f"react2_{timestamp2}",
+            "email": f"react2_{timestamp2}@example.com",
+            "password": "TestPass123!"
+        }
+        
+        # Register users
+        success1, response1 = self.run_test(
+            "Register DM React User 1",
+            "POST",
+            "auth/register",
+            200,
+            data=user1_data
+        )
+        if not success1:
+            return False
+            
+        success2, response2 = self.run_test(
+            "Register DM React User 2",
+            "POST",
+            "auth/register", 
+            200,
+            data=user2_data
+        )
+        if not success2:
+            return False
+            
+        user2_id = response2['user']['id']
+        
+        # Create DM conversation
+        success3, response3 = self.run_test(
+            "Create DM Conversation for Reactions",
+            "POST",
+            "dm/create",
+            200,
+            data={"recipient_id": user2_id, "content": ""}
+        )
+        if not success3:
+            return False
+            
+        conversation_id = response3['id']
+        
+        # Send DM message
+        success4, response4 = self.run_test(
+            "Send DM Message for Reactions",
+            "POST",
+            f"dm/{conversation_id}/messages",
+            200,
+            data={"content": "Hello for reaction test!"}
+        )
+        if not success4:
+            return False
+            
+        message_id = response4['id']
+            
+        # Add reaction to DM message
+        success5, response5 = self.run_test(
+            "Add DM Message Reaction",
+            "POST",
+            f"messages/{message_id}/reactions",
+            200,
+            data={"emoji": "👍"}
+        )
+        if not success5:
+            return False
+            
+        # Get reactions on DM message
+        success6, response6 = self.run_test(
+            "Get DM Message Reactions",
+            "GET",
+            f"messages/{message_id}/reactions",
+            200
+        )
+        if not success6:
+            return False
+            
+        # Remove reaction from DM message
+        success7, response7 = self.run_test(
+            "Remove DM Message Reaction",
+            "DELETE",
+            f"messages/{message_id}/reactions/👍",
+            200
+        )
+        
+        return success7
+
+    def test_channel_message_reactions(self):
+        """Test channel message reactions (add/remove)"""
+        if not self.test_channel_message_id:
+            self.log("❌ No test channel message available for reaction testing")
+            return False
+            
+        # Add reaction to channel message
+        success1, response1 = self.run_test(
+            "Add Channel Message Reaction",
+            "POST",
+            f"channel-messages/{self.test_channel_message_id}/reactions",
+            200,
+            data={"emoji": "❤️"}
+        )
+        if not success1:
+            return False
+            
+        # Remove reaction from channel message
+        success2, response2 = self.run_test(
+            "Remove Channel Message Reaction",
+            "DELETE",
+            f"channel-messages/{self.test_channel_message_id}/reactions/❤️",
+            200
+        )
+        
+        return success2
+
+    def test_dm_message_threads(self):
+        """Test DM message threading (reply/get)"""
+        if not self.test_dm_message_id:
+            self.log("❌ No test DM message available for thread testing")
+            return False
+            
+        # Reply in thread to DM message
+        success1, response1 = self.run_test(
+            "Reply in DM Thread",
+            "POST",
+            f"messages/{self.test_dm_message_id}/thread",
+            200,
+            data={"content": "This is a thread reply!"}
+        )
+        if not success1:
+            return False
+            
+        # Get thread replies for DM message
+        success2, response2 = self.run_test(
+            "Get DM Thread Replies",
+            "GET",
+            f"messages/{self.test_dm_message_id}/thread",
+            200
+        )
+        
+        return success2 and isinstance(response2, list)
+
+    def test_channel_message_threads(self):
+        """Test channel message threading"""
+        if not self.test_channel_message_id:
+            self.log("❌ No test channel message available for thread testing")
+            return False
+            
+        # Reply in thread to channel message
+        success1, response1 = self.run_test(
+            "Reply in Channel Thread",
+            "POST",
+            f"channel-messages/{self.test_channel_message_id}/thread",
+            200,
+            data={"content": "This is a channel thread reply!"}
+        )
+        if not success1:
+            return False
+            
+        # Get thread replies for channel message
+        success2, response2 = self.run_test(
+            "Get Channel Thread Replies",
+            "GET",
+            f"channel-messages/{self.test_channel_message_id}/thread",
+            200
+        )
+        
+        return success2 and isinstance(response2, list)
+
+    def test_dm_message_edit_delete(self):
+        """Test DM message editing and deletion"""
+        if not self.test_dm_message_id:
+            self.log("❌ No test DM message available for edit/delete testing")
+            return False
+            
+        # Edit DM message
+        success1, response1 = self.run_test(
+            "Edit DM Message",
+            "PUT",
+            f"messages/{self.test_dm_message_id}",
+            200,
+            data={"content": "Edited DM message content!"}
+        )
+        if not success1:
+            return False
+            
+        # Delete DM message
+        success2, response2 = self.run_test(
+            "Delete DM Message",
+            "DELETE",
+            f"messages/{self.test_dm_message_id}",
+            200
+        )
+        
+        return success2
+
+    def test_channel_message_edit_delete(self):
+        """Test channel message editing and deletion"""
+        if not self.test_channel_message_id:
+            self.log("❌ No test channel message available for edit/delete testing")
+            return False
+            
+        # Edit channel message
+        success1, response1 = self.run_test(
+            "Edit Channel Message",
+            "PUT",
+            f"channel-messages/{self.test_channel_message_id}",
+            200,
+            data={"content": "Edited channel message content!"}
+        )
+        if not success1:
+            return False
+            
+        # Delete channel message
+        success2, response2 = self.run_test(
+            "Delete Channel Message",
+            "DELETE",
+            f"channel-messages/{self.test_channel_message_id}",
+            200
+        )
+        
+        return success2
+
+    def test_voice_participants(self):
+        """Test voice channel participants endpoint"""
+        if not self.test_channel_id:
+            self.log("❌ No test channel available for voice participants testing")
+            return False
+            
+        # Get voice participants for channel
+        success, response = self.run_test(
+            "Get Voice Participants",
+            "GET",
+            f"channels/{self.test_channel_id}/voice-participants",
+            200
+        )
+        
+        return success and isinstance(response, list)
+
+    def test_update_check(self):
+        """Test system update check endpoint"""
+        success, response = self.run_test(
+            "System Update Check",
+            "GET",
+            "system/update-check",
+            200
+        )
+        
+        return success and 'current_version' in response and 'latest_version' in response
+
     def run_all_tests(self):
         """Run all backend API tests"""
         self.log("🚀 Starting SecureComm Backend API Tests")
@@ -565,7 +830,16 @@ class SecureCommAPITester:
             self.test_role_management,
             self.test_invite_system,
             self.test_status_update,
-            self.test_admin_stats
+            self.test_admin_stats,
+            # New Stage 4-6 features
+            self.test_dm_message_reactions,
+            self.test_channel_message_reactions,
+            self.test_dm_message_threads,
+            self.test_channel_message_threads,
+            self.test_dm_message_edit_delete,
+            self.test_channel_message_edit_delete,
+            self.test_voice_participants,
+            self.test_update_check
         ]
         
         for test in tests:

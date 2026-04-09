@@ -1,14 +1,16 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
-import { MessageCircle, Users, Plus, Shield, Settings, LogOut } from 'lucide-react';
+import { MessageCircle, Users, Plus, Shield, Settings, LogOut, BarChart3 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../components/ui/tooltip';
 import { ScrollArea } from '../components/ui/scroll-area';
 
-export default function ServerSidebar({ servers, activeServer, onSelectServer, onSelectDMs, onSelectFriends, onServerCreated }) {
+export default function ServerSidebar({ servers, activeServer, onSelectServer, onSelectDMs, onSelectFriends, onServerCreated, onOpenSettings }) {
+  const navigate = useNavigate();
   const { logout, user } = useAuth();
   const [showCreate, setShowCreate] = useState(false);
   const [showJoin, setShowJoin] = useState(false);
@@ -173,6 +175,24 @@ export default function ServerSidebar({ servers, activeServer, onSelectServer, o
               </TooltipTrigger>
               <TooltipContent side="right"><p>{user?.username}</p></TooltipContent>
             </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button onClick={() => onOpenSettings && onOpenSettings()} className="w-10 h-10 rounded-full bg-slate-800 text-slate-400 hover:text-slate-200 flex items-center justify-center transition-colors" data-testid="user-settings-btn">
+                  <Settings className="w-4 h-4" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right"><p>User Settings</p></TooltipContent>
+            </Tooltip>
+            {user?.role === 'admin' && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button onClick={() => navigate('/admin')} className="w-10 h-10 rounded-full bg-slate-800 text-amber-500 hover:text-amber-400 flex items-center justify-center transition-colors" data-testid="admin-dashboard-btn">
+                    <BarChart3 className="w-4 h-4" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right"><p>Admin Dashboard</p></TooltipContent>
+              </Tooltip>
+            )}
             <Tooltip>
               <TooltipTrigger asChild>
                 <button onClick={logout} className="w-10 h-10 rounded-full bg-slate-800 text-slate-400 hover:text-red-400 flex items-center justify-center transition-colors" data-testid="logout-btn">

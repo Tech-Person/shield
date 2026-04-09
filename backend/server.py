@@ -26,7 +26,7 @@ from models import (
     UserCreate, UserLogin, TwoFactorVerify, UserUpdate, StatusUpdate,
     FriendRequest, ServerCreate, ServerUpdate, ChannelCreate, ChannelUpdate,
     RoleCreate, RoleUpdate, MessageCreate, DMCreate, GroupDMCreate,
-    SearchQuery, InviteCreate, Permissions
+    SearchQuery, InviteCreate, Permissions, ReactionAdd, ThreadReply, MessageEdit
 )
 from encryption import encrypt_text, decrypt_text
 from websocket_manager import manager
@@ -569,6 +569,8 @@ async def get_dm_messages(conversation_id: str, request: Request, before: Option
             msg["content"] = decrypt_text(msg["content_encrypted"])
         msg.pop("content_encrypted", None)
         msg.pop("search_index", None)
+        msg["reactions"] = await db.reactions.find({"message_id": msg["id"]}, {"_id": 0}).to_list(50)
+        msg["thread_count"] = msg.get("thread_count", 0)
     messages.reverse()
     return messages
 
@@ -908,10 +910,240 @@ async def get_channel_messages(channel_id: str, request: Request, before: Option
         if msg.get("content_encrypted"):
             msg["content"] = decrypt_text(msg["content_encrypted"])
         msg.pop("content_encrypted", None)
+        msg["reactions"] = await db.reactions.find({"message_id": msg["id"]}, {"_id": 0}).to_list(50)
+        msg["thread_count"] = msg.get("thread_count", 0)
     messages.reverse()
     return messages
 
-# ─── ROLES ───
+# ─── REACTIONS (DM & Channel) ───
+@api_router.post("/messages/{message_id}/reactions")
+async def add_dm_reaction(message_id: str, data: ReactionAdd, request: Request):
+    user = await get_current_user(request)
+    msg = await db.messages.find_one({"id": message_id}, {"_id": 0})
+    if not msg:
+        raise HTTPException(404, "Message not found")
+    conv = await db.conversations.find_one({"id": msg["conversation_id"], "participants": user["id"]}, {"_id": 0})
+    if not conv:
+        raise HTTPException(403, "Not a participant")
+    await db.reactions.update_one(
+        {"message_id": message_id, "emoji": data.emoji, "user_id": user["id"]},
+        {"$setOnInsert": {"id": str(uuid.uuid4()), "message_id": message_id, "emoji": data.emoji, "user_id": user["id"], "username": user["username"], "created_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True
+    )
+    reactions = await db.reactions.find({"message_id": message_id}, {"_id": 0}).to_list(100)
+    for pid in conv["participants"]:
+        await manager.send_personal(pid, {"type": "reaction_update", "message_id": message_id, "reactions": reactions})
+    return {"message": "Reaction added"}
+
+@api_router.delete("/messages/{message_id}/reactions/{emoji}")
+async def remove_dm_reaction(message_id: str, emoji: str, request: Request):
+    user = await get_current_user(request)
+    await db.reactions.delete_one({"message_id": message_id, "emoji": emoji, "user_id": user["id"]})
+    reactions = await db.reactions.find({"message_id": message_id}, {"_id": 0}).to_list(100)
+    msg = await db.messages.find_one({"id": message_id}, {"_id": 0})
+    if msg:
+        conv = await db.conversations.find_one({"id": msg["conversation_id"]}, {"_id": 0})
+        if conv:
+            for pid in conv["participants"]:
+                await manager.send_personal(pid, {"type": "reaction_update", "message_id": message_id, "reactions": reactions})
+    return {"message": "Reaction removed"}
+
+@api_router.get("/messages/{message_id}/reactions")
+async def get_dm_reactions(message_id: str, request: Request):
+    await get_current_user(request)
+    reactions = await db.reactions.find({"message_id": message_id}, {"_id": 0}).to_list(100)
+    return reactions
+
+@api_router.post("/channel-messages/{message_id}/reactions")
+async def add_channel_reaction(message_id: str, data: ReactionAdd, request: Request):
+    user = await get_current_user(request)
+    msg = await db.channel_messages.find_one({"id": message_id}, {"_id": 0})
+    if not msg:
+        raise HTTPException(404, "Message not found")
+    member = await db.server_members.find_one({"server_id": msg["server_id"], "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    await db.reactions.update_one(
+        {"message_id": message_id, "emoji": data.emoji, "user_id": user["id"]},
+        {"$setOnInsert": {"id": str(uuid.uuid4()), "message_id": message_id, "emoji": data.emoji, "user_id": user["id"], "username": user["username"], "created_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True
+    )
+    reactions = await db.reactions.find({"message_id": message_id}, {"_id": 0}).to_list(100)
+    await manager.broadcast_channel(msg["channel_id"], {"type": "reaction_update", "message_id": message_id, "reactions": reactions})
+    return {"message": "Reaction added"}
+
+@api_router.delete("/channel-messages/{message_id}/reactions/{emoji}")
+async def remove_channel_reaction(message_id: str, emoji: str, request: Request):
+    user = await get_current_user(request)
+    await db.reactions.delete_one({"message_id": message_id, "emoji": emoji, "user_id": user["id"]})
+    reactions = await db.reactions.find({"message_id": message_id}, {"_id": 0}).to_list(100)
+    msg = await db.channel_messages.find_one({"id": message_id}, {"_id": 0})
+    if msg:
+        await manager.broadcast_channel(msg["channel_id"], {"type": "reaction_update", "message_id": message_id, "reactions": reactions})
+    return {"message": "Reaction removed"}
+
+# ─── THREADS ───
+@api_router.post("/messages/{message_id}/thread")
+async def reply_dm_thread(message_id: str, data: ThreadReply, request: Request):
+    user = await get_current_user(request)
+    parent = await db.messages.find_one({"id": message_id}, {"_id": 0})
+    if not parent:
+        raise HTTPException(404, "Message not found")
+    conv = await db.conversations.find_one({"id": parent["conversation_id"], "participants": user["id"]}, {"_id": 0})
+    if not conv:
+        raise HTTPException(403, "Not a participant")
+    reply_id = str(uuid.uuid4())
+    encrypted_content = encrypt_text(data.content)
+    reply = {
+        "id": reply_id,
+        "parent_message_id": message_id,
+        "conversation_id": parent["conversation_id"],
+        "sender_id": user["id"],
+        "sender_username": user["username"],
+        "sender_avatar": user.get("avatar_url"),
+        "content_encrypted": encrypted_content,
+        "attachments": data.attachments or [],
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.thread_replies.insert_one(reply)
+    await db.messages.update_one({"id": message_id}, {"$inc": {"thread_count": 1}})
+    broadcast = {"type": "thread_reply", "parent_message_id": message_id, "reply": {
+        "id": reply_id, "parent_message_id": message_id, "sender_id": user["id"],
+        "sender_username": user["username"], "content": data.content,
+        "attachments": data.attachments or [], "created_at": reply["created_at"]
+    }}
+    for pid in conv["participants"]:
+        await manager.send_personal(pid, broadcast)
+    return broadcast["reply"]
+
+@api_router.get("/messages/{message_id}/thread")
+async def get_dm_thread(message_id: str, request: Request):
+    await get_current_user(request)
+    replies = await db.thread_replies.find({"parent_message_id": message_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    for r in replies:
+        if r.get("content_encrypted"):
+            r["content"] = decrypt_text(r["content_encrypted"])
+        r.pop("content_encrypted", None)
+    return replies
+
+@api_router.post("/channel-messages/{message_id}/thread")
+async def reply_channel_thread(message_id: str, data: ThreadReply, request: Request):
+    user = await get_current_user(request)
+    parent = await db.channel_messages.find_one({"id": message_id}, {"_id": 0})
+    if not parent:
+        raise HTTPException(404, "Message not found")
+    member = await db.server_members.find_one({"server_id": parent["server_id"], "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    reply_id = str(uuid.uuid4())
+    encrypted_content = encrypt_text(data.content)
+    reply = {
+        "id": reply_id,
+        "parent_message_id": message_id,
+        "channel_id": parent["channel_id"],
+        "server_id": parent["server_id"],
+        "sender_id": user["id"],
+        "sender_username": user["username"],
+        "sender_avatar": user.get("avatar_url"),
+        "content_encrypted": encrypted_content,
+        "attachments": data.attachments or [],
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.thread_replies.insert_one(reply)
+    await db.channel_messages.update_one({"id": message_id}, {"$inc": {"thread_count": 1}})
+    broadcast = {"type": "thread_reply", "parent_message_id": message_id, "reply": {
+        "id": reply_id, "parent_message_id": message_id, "sender_id": user["id"],
+        "sender_username": user["username"], "content": data.content,
+        "attachments": data.attachments or [], "created_at": reply["created_at"]
+    }}
+    await manager.broadcast_channel(parent["channel_id"], broadcast)
+    return broadcast["reply"]
+
+@api_router.get("/channel-messages/{message_id}/thread")
+async def get_channel_thread(message_id: str, request: Request):
+    await get_current_user(request)
+    replies = await db.thread_replies.find({"parent_message_id": message_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
+    for r in replies:
+        if r.get("content_encrypted"):
+            r["content"] = decrypt_text(r["content_encrypted"])
+        r.pop("content_encrypted", None)
+    return replies
+
+# ─── MESSAGE EDIT / DELETE ───
+@api_router.put("/messages/{message_id}")
+async def edit_dm_message(message_id: str, data: MessageEdit, request: Request):
+    user = await get_current_user(request)
+    msg = await db.messages.find_one({"id": message_id, "sender_id": user["id"]}, {"_id": 0})
+    if not msg:
+        raise HTTPException(404, "Message not found or not yours")
+    encrypted = encrypt_text(data.content)
+    await db.messages.update_one({"id": message_id}, {"$set": {"content_encrypted": encrypted, "edited": True}})
+    conv = await db.conversations.find_one({"id": msg["conversation_id"]}, {"_id": 0})
+    if conv:
+        for pid in conv["participants"]:
+            await manager.send_personal(pid, {"type": "message_edited", "message_id": message_id, "content": data.content, "edited": True})
+    return {"message": "Edited"}
+
+@api_router.delete("/messages/{message_id}")
+async def delete_dm_message(message_id: str, request: Request):
+    user = await get_current_user(request)
+    msg = await db.messages.find_one({"id": message_id, "sender_id": user["id"]}, {"_id": 0})
+    if not msg:
+        raise HTTPException(404, "Message not found or not yours")
+    await db.messages.delete_one({"id": message_id})
+    await db.reactions.delete_many({"message_id": message_id})
+    await db.thread_replies.delete_many({"parent_message_id": message_id})
+    conv = await db.conversations.find_one({"id": msg["conversation_id"]}, {"_id": 0})
+    if conv:
+        for pid in conv["participants"]:
+            await manager.send_personal(pid, {"type": "message_deleted", "message_id": message_id})
+    return {"message": "Deleted"}
+
+@api_router.put("/channel-messages/{message_id}")
+async def edit_channel_message(message_id: str, data: MessageEdit, request: Request):
+    user = await get_current_user(request)
+    msg = await db.channel_messages.find_one({"id": message_id, "sender_id": user["id"]}, {"_id": 0})
+    if not msg:
+        raise HTTPException(404, "Message not found or not yours")
+    encrypted = encrypt_text(data.content)
+    await db.channel_messages.update_one({"id": message_id}, {"$set": {"content_encrypted": encrypted, "edited": True}})
+    await manager.broadcast_channel(msg["channel_id"], {"type": "message_edited", "message_id": message_id, "content": data.content, "edited": True})
+    return {"message": "Edited"}
+
+@api_router.delete("/channel-messages/{message_id}")
+async def delete_channel_message(message_id: str, request: Request):
+    user = await get_current_user(request)
+    msg = await db.channel_messages.find_one({"id": message_id, "sender_id": user["id"]}, {"_id": 0})
+    if not msg:
+        raise HTTPException(404, "Message not found or not yours")
+    await db.channel_messages.delete_one({"id": message_id})
+    await db.reactions.delete_many({"message_id": message_id})
+    await db.thread_replies.delete_many({"parent_message_id": message_id})
+    await manager.broadcast_channel(msg["channel_id"], {"type": "message_deleted", "message_id": message_id})
+    return {"message": "Deleted"}
+
+# ─── VOICE CHANNEL INFO ───
+@api_router.get("/channels/{channel_id}/voice-participants")
+async def get_voice_participants(channel_id: str, request: Request):
+    await get_current_user(request)
+    participants = list(manager.get_voice_participants(channel_id))
+    users = []
+    for uid in participants:
+        u = await db.users.find_one({"id": uid}, {"_id": 0, "password_hash": 0, "totp_secret": 0})
+        if u:
+            users.append({"id": u["id"], "username": u["username"], "display_name": u.get("display_name"), "avatar_url": u.get("avatar_url")})
+    return users
+
+# ─── UPDATE CHECK ───
+@api_router.get("/system/update-check")
+async def check_for_updates(request: Request):
+    return {
+        "current_version": "1.0.0",
+        "latest_version": "1.0.0",
+        "update_available": False,
+        "release_url": "https://github.com/securecomm/securecomm/releases",
+        "changelog": "Initial release with encrypted messaging, servers, channels, voice/video, and share drives."
+    }
 @api_router.post("/servers/{server_id}/roles")
 async def create_role(server_id: str, data: RoleCreate, request: Request):
     user = await get_current_user(request)
@@ -1021,7 +1253,7 @@ async def upload_file(request: Request, file: UploadFile = File(...), context: s
 
 @api_router.get("/files/{file_id}/download")
 async def download_file(file_id: str, request: Request):
-    user = await get_current_user(request)
+    await get_current_user(request)
     record = await db.files.find_one({"id": file_id, "is_deleted": False}, {"_id": 0})
     if not record:
         raise HTTPException(404, "File not found")
@@ -1105,8 +1337,6 @@ async def get_admin_stats(request: Request):
     drive_storage = await db.drive_files.aggregate(pipeline).to_list(1)
 
     voice_channels_active = sum(1 for v in manager.voice_participants.values() if len(v) > 0)
-
-    stats_doc = await db.stats.find_one({"key": "global"}, {"_id": 0})
 
     now = datetime.now(timezone.utc)
     day_ago = (now - timedelta(days=1)).isoformat()
@@ -1232,6 +1462,9 @@ async def startup():
     await db.drive_files.create_index("id", unique=True)
     await db.drive_files.create_index("server_id")
     await db.login_attempts.create_index("identifier")
+    await db.reactions.create_index("message_id")
+    await db.reactions.create_index([("message_id", 1), ("emoji", 1), ("user_id", 1)], unique=True)
+    await db.thread_replies.create_index("parent_message_id")
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@securecomm.local")
     admin_password = os.environ.get("ADMIN_PASSWORD", "SecureAdmin2024!")
