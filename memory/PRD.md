@@ -1,20 +1,18 @@
 # Shield - Privacy-Focused Communication Platform (PRD)
 
 ## Original Problem Statement
-User wants a privacy-focused replacement for Discord named "Shield". Key features: E2E encrypted (hybrid approach - encrypted at rest on server), servers, roles, text/voice channels, DMs, friends list. Voice/video streaming (P2P preferred, server fallback, up to 10 viewers). Share drive for servers (25GB limit). User media limit 5GB. Web UI + PWA + Debian deployment. Features include message reactions, threads, GIFs, typing indicators, read receipts, admin GUI, user statuses, and self-destructing status messages.
-
-## Tech Stack
-React + Tailwind/Shadcn | FastAPI | MongoDB | WebSockets | JWT + WebAuthn | Emergent Object Storage | Fernet encryption
+Privacy-focused Discord replacement named "Shield". E2E encrypted (at-rest), servers/roles/channels, DMs, voice/video, share drive, PWA + Debian deployment.
 
 ## Implemented Features
 - [x] Auth (Login, Register, 2FA/TOTP, Passkeys/WebAuthn)
 - [x] Server/Channel CRUD, DMs, real-time messaging, reactions, threads, GIFs, typing, file uploads, PWA
 - [x] Custom Emojis/Stickers, Share Drive, Storage Requests, Quick Status, Escape Key Nav
-- [x] 47-flag permission system, @everyone role, Discord-style Role Editor UI
-- [x] **Role assignment per member** (badges + popover add/remove)
-- [x] **Debian deployment** (install.sh, uninstall.sh, README.md)
-- [x] **Renamed to Shield** (all branding, .env, manifest, service names)
-- [x] Admin Dashboard with stats, storage request approval
+- [x] 47-flag permission system, @everyone role, Discord-style Role Editor, Role Assignment per Member
+- [x] Debian deployment (install.sh with interactive prompts, uninstall.sh, README.md)
+- [x] Local file storage fallback for self-hosted (no Emergent dependency)
+- [x] **UI-Driven Update System** — Admin Dashboard panel: configurable GitHub repo URL, check for updates (shows recent commits), apply update (git pull + pip install + yarn build + service restart), background task with live status/log polling
+- [x] Admin Dashboard with stats, storage requests, server list
+- [x] Renamed to Shield throughout
 
 ## Backlog
 ### P1: P2P Voice/Video (WebRTC), E2E Encryption validation, Read receipts, Extended permission enforcement
