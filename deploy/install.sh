@@ -203,21 +203,24 @@ cd "${INSTALL_DIR}/backend"
 
 python3 -m venv venv
 source venv/bin/activate
-pip install --quiet --upgrade pip
+pip install --upgrade pip
 
 if [[ -f requirements.txt ]]; then
-    # Filter out emergentintegrations (Emergent platform-only package, not on public PyPI)
+    # Filter out emergentintegrations (Emergent platform-only, not on public PyPI)
     grep -iv "emergentintegrations" requirements.txt > /tmp/shield-requirements.txt
-    pip install --quiet -r /tmp/shield-requirements.txt || {
-        warn "Some packages failed. Installing core dependencies manually..."
-        pip install --quiet fastapi uvicorn motor pymongo "python-jose[cryptography]" "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles
+    pip install -r /tmp/shield-requirements.txt || {
+        warn "requirements.txt install had errors. Installing core deps manually..."
+        pip install fastapi "uvicorn[standard]" motor pymongo "python-jose[cryptography]" "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles python-dotenv pyotp "qrcode[pil]" bcrypt requests
     }
     rm -f /tmp/shield-requirements.txt
 else
-    pip install --quiet fastapi uvicorn motor pymongo "python-jose[cryptography]" "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles
+    pip install fastapi "uvicorn[standard]" motor pymongo "python-jose[cryptography]" "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles python-dotenv pyotp "qrcode[pil]" bcrypt requests
 fi
 
-ENCRYPTION_KEY=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())') || err "Failed to generate encryption key. Is cryptography installed?"
+# Verify critical packages installed
+python3 -c "import fastapi; import motor; import cryptography; print('All core packages OK')" || err "Critical Python packages missing. Check pip output above."
+
+ENCRYPTION_KEY=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())') || err "Failed to generate encryption key."
 deactivate
 
 cat > "${INSTALL_DIR}/backend/.env" <<ENVEOF
