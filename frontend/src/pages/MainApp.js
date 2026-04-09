@@ -58,6 +58,21 @@ export default function MainApp() {
     loadConversations();
   }, [loadServers, loadConversations]);
 
+  // Escape key to back out of menus/views
+  useEffect(() => {
+    const handleEscape = (e) => {
+      if (e.key !== 'Escape') return;
+      if (showSettings) { setShowSettings(null); return; }
+      if (showServerSettings) { setShowServerSettings(false); return; }
+      if (showDrive) { setShowDrive(false); return; }
+      if (activeConversation) { setActiveConversation(null); return; }
+      if (activeChannel) { setActiveChannel(null); return; }
+      if (activeServer) { setActiveServer(null); setServerData(null); setActiveView('friends'); return; }
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [showSettings, showServerSettings, showDrive, activeConversation, activeChannel, activeServer]);
+
   useEffect(() => {
     if (activeServer) {
       loadServerData(activeServer);

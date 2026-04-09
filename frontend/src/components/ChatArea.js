@@ -1,12 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../lib/api';
-import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon } from 'lucide-react';
+import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon, Sticker } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/ui/dialog';
 import { Button } from '../components/ui/button';
 import GifPicker from './GifPicker';
+import EmojiManager from './EmojiManager';
 
 const COMMON_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '✅', '❌', '💯', '🙏'];
 
@@ -24,6 +25,7 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
   const [threadReply, setThreadReply] = useState('');
   const [uploading, setUploading] = useState(false);
   const [gifPickerOpen, setGifPickerOpen] = useState(false);
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
   const [typingUsers, setTypingUsers] = useState([]);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
@@ -112,6 +114,18 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
       const endpoint = isChannel ? `/channels/${channel.id}/messages` : `/dm/${conversation.id}/messages`;
       const { data } = await api.post(endpoint, { content });
       setMessages(prev => [...prev, { ...data, reactions: data.reactions || [], thread_count: data.thread_count || 0 }]);
+    } catch {}
+  };
+
+  const handleCustomEmojiSelect = async (emoji) => {
+    const backendUrl = process.env.REACT_APP_BACKEND_URL;
+    const emojiUrl = `${backendUrl}/api/emojis/${emoji.id}/image`;
+    const content = emoji.type === 'sticker' ? `[sticker:${emoji.name}](${emojiUrl})` : `[emoji:${emoji.name}](${emojiUrl})`;
+    try {
+      const endpoint = isChannel ? `/channels/${channel.id}/messages` : `/dm/${conversation.id}/messages`;
+      const { data } = await api.post(endpoint, { content });
+      setMessages(prev => [...prev, { ...data, reactions: data.reactions || [], thread_count: data.thread_count || 0 }]);
+      setEmojiPickerOpen(false);
     } catch {}
   };
 
@@ -417,7 +431,7 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
                 <span className="text-xs font-medium text-emerald-400">{threadMsg.sender_username}</span>
                 <span className="text-[10px] font-mono text-slate-600">{formatTime(threadMsg.created_at)}</span>
               </div>
-              <p className="text-sm text-slate-300">{threadMsg.content}</p>
+              <MessageContent content={threadMsg.content} />
             </div>
             {/* Replies */}
             <ScrollArea className="flex-1">
@@ -432,7 +446,7 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
                         <span className="text-xs font-medium text-slate-200">{r.sender_username}</span>
                         <span className="text-[10px] font-mono text-slate-600">{formatTime(r.created_at)}</span>
                       </div>
-                      <p className="text-sm text-slate-300">{r.content}</p>
+                      <MessageContent content={r.content} />
                     </div>
                   </div>
                 ))}
@@ -468,6 +482,13 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
         </div>
       )}
 
+      {/* Custom emoji picker */}
+      {emojiPickerOpen && (
+        <div className="absolute bottom-20 left-28 z-50" data-testid="custom-emoji-picker-container">
+          <EmojiManager onSelect={handleCustomEmojiSelect} onClose={() => setEmojiPickerOpen(false)} />
+        </div>
+      )}
+
       {/* Message input */}
       <div className="p-4 border-t border-white/5 flex-shrink-0 relative">
         <form onSubmit={handleSend} className="flex items-center gap-2">
@@ -477,6 +498,9 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
           </button>
           <button type="button" onClick={() => setGifPickerOpen(!gifPickerOpen)} className={`p-2.5 rounded-md transition-colors ${gifPickerOpen ? 'text-emerald-400 bg-emerald-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`} data-testid="gif-picker-btn">
             <ImageIcon className="w-4 h-4" />
+          </button>
+          <button type="button" onClick={() => setEmojiPickerOpen(!emojiPickerOpen)} className={`p-2.5 rounded-md transition-colors ${emojiPickerOpen ? 'text-emerald-400 bg-emerald-500/10' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800'}`} data-testid="custom-emoji-btn">
+            <Sticker className="w-4 h-4" />
           </button>
           <div className="flex-1 relative">
             <Input ref={inputRef} value={newMessage} onChange={handleMessageInput} placeholder={`Message ${isChannel ? '#' : ''}${title}`} className="bg-slate-900 border-white/10 text-slate-100 pr-10 focus:ring-1 focus:ring-emerald-500/50 font-['IBM_Plex_Sans']" data-testid="chat-message-input" />
@@ -490,13 +514,31 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
   );
 }
 
-// Renders message content with inline GIF support
+// Renders message content with inline GIF, emoji, and sticker support
 function MessageContent({ content }) {
   const gifMatch = content?.match(/^\[gif\]\((https?:\/\/[^\s)]+)\)$/);
   if (gifMatch) {
     return (
       <div className="mt-1 max-w-sm">
         <img src={gifMatch[1]} alt="GIF" className="rounded-lg max-h-64 w-auto" loading="lazy" data-testid="gif-message-image" />
+      </div>
+    );
+  }
+  // Custom sticker
+  const stickerMatch = content?.match(/^\[sticker:([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+  if (stickerMatch) {
+    return (
+      <div className="mt-1">
+        <img src={stickerMatch[2]} alt={stickerMatch[1]} className="w-32 h-32 object-contain" loading="lazy" data-testid="sticker-message-image" />
+      </div>
+    );
+  }
+  // Custom emoji (inline)
+  const emojiMatch = content?.match(/^\[emoji:([^\]]+)\]\((https?:\/\/[^\s)]+)\)$/);
+  if (emojiMatch) {
+    return (
+      <div className="mt-0.5 inline-block">
+        <img src={emojiMatch[2]} alt={emojiMatch[1]} className="w-8 h-8 object-contain inline" loading="lazy" data-testid="custom-emoji-message" />
       </div>
     );
   }

@@ -12,16 +12,19 @@ export default function AdminDashboard() {
   const navigate = useNavigate();
   const [stats, setStats] = useState(null);
   const [servers, setServers] = useState([]);
+  const [storageRequests, setStorageRequests] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const loadStats = useCallback(async () => {
     try {
-      const [statsRes, serversRes] = await Promise.all([
+      const [statsRes, serversRes, storageRes] = await Promise.all([
         api.get('/admin/stats'),
-        api.get('/admin/servers')
+        api.get('/admin/servers'),
+        api.get('/admin/storage-requests')
       ]);
       setStats(statsRes.data);
       setServers(serversRes.data);
+      setStorageRequests(storageRes.data);
     } catch {}
     setLoading(false);
   }, []);
@@ -40,6 +43,20 @@ export default function AdminDashboard() {
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
     return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  };
+
+  const handleApproveStorage = async (requestId, requestedGb) => {
+    try {
+      await api.post(`/admin/storage-requests/${requestId}/approve`, { approved_gb: requestedGb });
+      loadStats();
+    } catch {}
+  };
+
+  const handleDenyStorage = async (requestId) => {
+    try {
+      await api.post(`/admin/storage-requests/${requestId}/deny`, { note: 'Denied by admin' });
+      loadStats();
+    } catch {}
   };
 
   if (loading) {
@@ -111,6 +128,38 @@ export default function AdminDashboard() {
             </ResponsiveContainer>
           </div>
         </div>
+
+        {/* Storage Requests */}
+        {storageRequests.length > 0 && (
+          <div className="mb-8 p-6 bg-slate-900/50 border border-white/5 rounded-lg">
+            <div className="flex items-center gap-2 mb-4">
+              <HardDrive className="w-4 h-4 text-amber-500" />
+              <h3 className="text-sm font-medium text-slate-200 font-['Outfit']">Pending Storage Requests</h3>
+              <span className="ml-auto text-xs font-mono bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full">{storageRequests.length}</span>
+            </div>
+            <div className="space-y-2">
+              {storageRequests.map(req => (
+                <div key={req.id} className="flex items-center justify-between px-4 py-3 bg-slate-800/30 rounded border border-white/5" data-testid={`admin-storage-request-${req.id}`}>
+                  <div>
+                    <p className="text-sm text-slate-200">{req.server_name}</p>
+                    <p className="text-xs text-slate-500">
+                      Requested by {req.requester_username} — {req.requested_gb} GB (current: {req.current_limit_gb?.toFixed(1)} GB)
+                    </p>
+                    {req.reason && <p className="text-xs text-slate-400 mt-0.5">{req.reason}</p>}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={() => handleApproveStorage(req.id, req.requested_gb)} className="bg-emerald-500 text-slate-950 hover:bg-emerald-400 h-8 text-xs" data-testid={`approve-storage-${req.id}`}>
+                      Approve
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => handleDenyStorage(req.id)} className="border-red-500/30 text-red-400 hover:bg-red-500/10 h-8 text-xs" data-testid={`deny-storage-${req.id}`}>
+                      Deny
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Server list */}
         <div className="p-6 bg-slate-900/50 border border-white/5 rounded-lg">

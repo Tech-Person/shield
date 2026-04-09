@@ -701,7 +701,11 @@ async def update_server(server_id: str, data: ServerUpdate, request: Request):
         raise HTTPException(403, "Only the owner can update server settings")
     updates = {k: v for k, v in data.model_dump(exclude_unset=True).items()}
     if "storage_limit_gb" in updates:
-        updates["storage_limit_bytes"] = int(updates.pop("storage_limit_gb") * 1024 * 1024 * 1024)
+        new_limit = int(updates.pop("storage_limit_gb") * 1024 * 1024 * 1024)
+        admin_approved = server.get("admin_approved_limit_bytes", server.get("storage_limit_bytes", 25 * 1024**3))
+        if new_limit > admin_approved:
+            raise HTTPException(400, f"Cannot exceed admin-approved limit of {admin_approved / (1024**3):.1f} GB. Request more via storage requests.")
+        updates["storage_limit_bytes"] = new_limit
     if updates:
         await db.servers.update_one({"id": server_id}, {"$set": updates})
     return {"message": "Server updated"}
@@ -1475,7 +1479,13 @@ async def download_file(file_id: str, request: Request):
     await get_current_user(request)
     record = await db.files.find_one({"id": file_id, "is_deleted": False}, {"_id": 0})
     if not record:
+        # Also check drive files
+        record = await db.drive_files.find_one({"id": file_id, "is_deleted": False}, {"_id": 0})
+    if not record:
         raise HTTPException(404, "File not found")
+    if record.get("is_text_file"):
+        content = decrypt_text(record.get("content_encrypted", ""))
+        return Response(content=content.encode("utf-8"), media_type="text/plain", headers={"Content-Disposition": f"attachment; filename=\"{record['original_filename']}\""})
     data, content_type = get_object(record["storage_path"])
     return Response(content=data, media_type=record.get("content_type", content_type))
 
@@ -1508,6 +1518,7 @@ async def upload_drive_file(server_id: str, request: Request, file: UploadFile =
         "uploader_id": user["id"],
         "uploader_username": user["username"],
         "is_deleted": False,
+        "is_text_file": False,
         "created_at": datetime.now(timezone.utc).isoformat()
     }
     await db.drive_files.insert_one(file_doc)
@@ -1536,6 +1547,235 @@ async def delete_drive_file(server_id: str, file_id: str, request: Request):
     await db.drive_files.update_one({"id": file_id}, {"$set": {"is_deleted": True}})
     await db.servers.update_one({"id": server_id}, {"$inc": {"storage_used_bytes": -file_doc["size"]}})
     return {"message": "File deleted"}
+
+# ─── SHARE DRIVE TEXT FILES ───
+from pydantic import BaseModel as PydanticBaseModel
+
+class TextFileCreate(PydanticBaseModel):
+    filename: str
+    content: str
+
+class TextFileUpdate(PydanticBaseModel):
+    content: str
+
+@api_router.post("/servers/{server_id}/drive/text")
+async def create_text_file(server_id: str, data: TextFileCreate, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server:
+        raise HTTPException(404, "Server not found")
+    content_bytes = data.content.encode("utf-8")
+    size = len(content_bytes)
+    if server["storage_used_bytes"] + size > server["storage_limit_bytes"]:
+        raise HTTPException(400, "Server storage limit exceeded")
+    encrypted_content = encrypt_text(data.content)
+    file_id = str(uuid.uuid4())
+    file_doc = {
+        "id": file_id,
+        "server_id": server_id,
+        "original_filename": data.filename if data.filename.endswith(".txt") else data.filename + ".txt",
+        "content_type": "text/plain",
+        "content_encrypted": encrypted_content,
+        "size": size,
+        "uploader_id": user["id"],
+        "uploader_username": user["username"],
+        "is_deleted": False,
+        "is_text_file": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.drive_files.insert_one(file_doc)
+    await db.servers.update_one({"id": server_id}, {"$inc": {"storage_used_bytes": size}})
+    file_doc.pop("_id", None)
+    file_doc["content"] = data.content
+    file_doc.pop("content_encrypted", None)
+    return file_doc
+
+@api_router.get("/servers/{server_id}/drive/{file_id}/content")
+async def get_text_file_content(server_id: str, file_id: str, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    f = await db.drive_files.find_one({"id": file_id, "server_id": server_id, "is_deleted": False, "is_text_file": True}, {"_id": 0})
+    if not f:
+        raise HTTPException(404, "File not found")
+    content = decrypt_text(f.get("content_encrypted", ""))
+    return {"id": f["id"], "filename": f["original_filename"], "content": content, "updated_at": f.get("updated_at")}
+
+@api_router.put("/servers/{server_id}/drive/{file_id}/content")
+async def update_text_file(server_id: str, file_id: str, data: TextFileUpdate, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    f = await db.drive_files.find_one({"id": file_id, "server_id": server_id, "is_deleted": False, "is_text_file": True}, {"_id": 0})
+    if not f:
+        raise HTTPException(404, "File not found")
+    old_size = f["size"]
+    new_size = len(data.content.encode("utf-8"))
+    encrypted = encrypt_text(data.content)
+    await db.drive_files.update_one({"id": file_id}, {"$set": {"content_encrypted": encrypted, "size": new_size, "updated_at": datetime.now(timezone.utc).isoformat()}})
+    await db.servers.update_one({"id": server_id}, {"$inc": {"storage_used_bytes": new_size - old_size}})
+    return {"message": "File updated"}
+
+@api_router.get("/servers/{server_id}/drive/{file_id}/link")
+async def get_drive_file_link(server_id: str, file_id: str, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    f = await db.drive_files.find_one({"id": file_id, "server_id": server_id, "is_deleted": False}, {"_id": 0})
+    if not f:
+        raise HTTPException(404, "File not found")
+    return {"link": f"/api/files/{file_id}/download", "filename": f["original_filename"]}
+
+# ─── CUSTOM EMOJIS / STICKERS ───
+@api_router.post("/emojis/upload")
+async def upload_emoji(request: Request, file: UploadFile = File(...), name: str = Query(...), emoji_type: str = Query("emoji")):
+    user = await get_current_user(request)
+    data = await file.read()
+    size = len(data)
+    if size > 512 * 1024:
+        raise HTTPException(400, "Emoji/sticker must be under 512KB")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(400, "Must be an image file")
+    path = generate_storage_path(user["id"], file.filename, "emojis")
+    result = put_object(path, data, file.content_type)
+    emoji_id = str(uuid.uuid4())
+    doc = {
+        "id": emoji_id,
+        "name": name.strip().lower().replace(" ", "_"),
+        "type": emoji_type,
+        "storage_path": result["path"],
+        "content_type": file.content_type,
+        "size": size,
+        "owner_id": user["id"],
+        "owner_username": user["username"],
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.custom_emojis.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+@api_router.get("/emojis/mine")
+async def get_my_emojis(request: Request):
+    user = await get_current_user(request)
+    own = await db.custom_emojis.find({"owner_id": user["id"]}, {"_id": 0}).to_list(200)
+    saved = await db.saved_emojis.find({"user_id": user["id"]}, {"_id": 0}).to_list(200)
+    saved_ids = [s["emoji_id"] for s in saved]
+    saved_emojis = []
+    if saved_ids:
+        saved_emojis = await db.custom_emojis.find({"id": {"$in": saved_ids}}, {"_id": 0}).to_list(200)
+    return {"owned": own, "saved": saved_emojis}
+
+@api_router.get("/emojis/{emoji_id}/image")
+async def get_emoji_image(emoji_id: str):
+    doc = await db.custom_emojis.find_one({"id": emoji_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Emoji not found")
+    data, ct = get_object(doc["storage_path"])
+    return Response(content=data, media_type=doc.get("content_type", ct))
+
+@api_router.post("/emojis/{emoji_id}/save")
+async def save_emoji(emoji_id: str, request: Request):
+    user = await get_current_user(request)
+    doc = await db.custom_emojis.find_one({"id": emoji_id}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Emoji not found")
+    await db.saved_emojis.update_one(
+        {"user_id": user["id"], "emoji_id": emoji_id},
+        {"$setOnInsert": {"id": str(uuid.uuid4()), "user_id": user["id"], "emoji_id": emoji_id, "created_at": datetime.now(timezone.utc).isoformat()}},
+        upsert=True
+    )
+    return {"message": "Emoji saved to your library"}
+
+@api_router.delete("/emojis/{emoji_id}/save")
+async def unsave_emoji(emoji_id: str, request: Request):
+    user = await get_current_user(request)
+    await db.saved_emojis.delete_one({"user_id": user["id"], "emoji_id": emoji_id})
+    return {"message": "Emoji removed from library"}
+
+@api_router.delete("/emojis/{emoji_id}")
+async def delete_emoji(emoji_id: str, request: Request):
+    user = await get_current_user(request)
+    doc = await db.custom_emojis.find_one({"id": emoji_id, "owner_id": user["id"]}, {"_id": 0})
+    if not doc:
+        raise HTTPException(404, "Emoji not found or not yours")
+    await db.custom_emojis.delete_one({"id": emoji_id})
+    await db.saved_emojis.delete_many({"emoji_id": emoji_id})
+    return {"message": "Emoji deleted"}
+
+# ─── STORAGE REQUESTS ───
+@api_router.post("/servers/{server_id}/storage-request")
+async def request_storage(server_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "Only server owner can request storage")
+    body = await request.json()
+    req_id = str(uuid.uuid4())
+    req_doc = {
+        "id": req_id,
+        "server_id": server_id,
+        "server_name": server["name"],
+        "requester_id": user["id"],
+        "requester_username": user["username"],
+        "requested_gb": body.get("requested_gb", 50),
+        "current_limit_gb": server["storage_limit_bytes"] / (1024**3),
+        "reason": body.get("reason", ""),
+        "status": "pending",
+        "approved_gb": None,
+        "admin_note": None,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.storage_requests.insert_one(req_doc)
+    req_doc.pop("_id", None)
+    return req_doc
+
+@api_router.get("/servers/{server_id}/storage-request")
+async def get_storage_requests(server_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "Not the server owner")
+    reqs = await db.storage_requests.find({"server_id": server_id}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    return reqs
+
+@api_router.get("/admin/storage-requests")
+async def admin_list_storage_requests(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    reqs = await db.storage_requests.find({"status": "pending"}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return reqs
+
+@api_router.post("/admin/storage-requests/{request_id}/approve")
+async def admin_approve_storage(request_id: str, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    body = await request.json()
+    approved_gb = body.get("approved_gb")
+    req_doc = await db.storage_requests.find_one({"id": request_id, "status": "pending"}, {"_id": 0})
+    if not req_doc:
+        raise HTTPException(404, "Request not found")
+    new_limit = int(approved_gb * 1024**3)
+    await db.servers.update_one({"id": req_doc["server_id"]}, {"$set": {"storage_limit_bytes": new_limit, "admin_approved_limit_bytes": new_limit}})
+    await db.storage_requests.update_one({"id": request_id}, {"$set": {"status": "approved", "approved_gb": approved_gb, "admin_note": body.get("note", "")}})
+    return {"message": "Storage request approved"}
+
+@api_router.post("/admin/storage-requests/{request_id}/deny")
+async def admin_deny_storage(request_id: str, request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    body = await request.json()
+    await db.storage_requests.update_one({"id": request_id}, {"$set": {"status": "denied", "admin_note": body.get("note", "")}})
+    return {"message": "Storage request denied"}
 
 # ─── ADMIN ROUTES ───
 @api_router.get("/admin/stats")
@@ -1686,6 +1926,11 @@ async def startup():
     await db.thread_replies.create_index("parent_message_id")
     await db.passkey_credentials.create_index([("user_id", 1), ("credential_id", 1)], unique=True)
     await db.passkey_challenges.create_index("user_id")
+    await db.custom_emojis.create_index("owner_id")
+    await db.custom_emojis.create_index("id", unique=True)
+    await db.saved_emojis.create_index([("user_id", 1), ("emoji_id", 1)], unique=True)
+    await db.storage_requests.create_index("server_id")
+    await db.storage_requests.create_index("status")
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@securecomm.local")
     admin_password = os.environ.get("ADMIN_PASSWORD", "SecureAdmin2024!")

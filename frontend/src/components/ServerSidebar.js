@@ -2,21 +2,40 @@ import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
-import { MessageCircle, Users, Plus, Shield, Settings, LogOut, BarChart3 } from 'lucide-react';
+import { MessageCircle, Users, Plus, Shield, Settings, LogOut, BarChart3, Circle, ChevronUp } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '../components/ui/dialog';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../components/ui/tooltip';
 import { ScrollArea } from '../components/ui/scroll-area';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 
 export default function ServerSidebar({ servers, activeServer, onSelectServer, onSelectDMs, onSelectFriends, onServerCreated, onOpenSettings }) {
   const navigate = useNavigate();
-  const { logout, user } = useAuth();
+  const { logout, user, setUser } = useAuth();
   const [showCreate, setShowCreate] = useState(false);
   const [showJoin, setShowJoin] = useState(false);
   const [serverName, setServerName] = useState('');
   const [inviteCode, setInviteCode] = useState('');
   const [creating, setCreating] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(false);
+
+  const STATUS_OPTIONS = [
+    { value: 'online', label: 'Online', color: 'bg-emerald-500' },
+    { value: 'away', label: 'Away', color: 'bg-amber-500' },
+    { value: 'busy', label: 'Busy', color: 'bg-red-500' },
+    { value: 'invisible', label: 'Invisible', color: 'bg-slate-500' },
+  ];
+
+  const currentStatus = STATUS_OPTIONS.find(s => s.value === (user?.status || 'online')) || STATUS_OPTIONS[0];
+
+  const handleStatusChange = async (status) => {
+    try {
+      await api.put('/users/me/status', { status });
+      setUser(prev => ({ ...prev, status }));
+      setStatusOpen(false);
+    } catch {}
+  };
 
   const handleCreate = async () => {
     if (!serverName.trim()) return;
@@ -165,16 +184,32 @@ export default function ServerSidebar({ servers, activeServer, onSelectServer, o
             </DialogContent>
           </Dialog>
 
-          {/* User avatar / settings */}
+          {/* User area with status */}
           <div className="flex flex-col items-center gap-2 pt-2 border-t border-white/5 w-full px-3">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button className="w-10 h-10 rounded-full bg-emerald-500/20 text-emerald-500 flex items-center justify-center text-sm font-medium" data-testid="user-avatar-btn">
-                  {user?.username?.slice(0, 2).toUpperCase() || '??'}
+            <Popover open={statusOpen} onOpenChange={setStatusOpen}>
+              <PopoverTrigger asChild>
+                <button className="w-12 h-12 rounded-2xl bg-slate-800/80 flex items-center justify-center relative group hover:bg-slate-700 transition-colors" data-testid="user-status-btn">
+                  <span className="text-sm font-medium text-slate-200">{user?.username?.slice(0, 2).toUpperCase() || '??'}</span>
+                  <span className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full border-2 border-slate-950 ${currentStatus.color}`} />
                 </button>
-              </TooltipTrigger>
-              <TooltipContent side="right"><p>{user?.username}</p></TooltipContent>
-            </Tooltip>
+              </PopoverTrigger>
+              <PopoverContent side="right" align="end" className="bg-slate-900 border-white/10 w-48 p-2" data-testid="status-popover">
+                <p className="text-xs font-mono uppercase tracking-widest text-slate-500 px-2 mb-2">Set Status</p>
+                {STATUS_OPTIONS.map(s => (
+                  <button
+                    key={s.value}
+                    onClick={() => handleStatusChange(s.value)}
+                    className={`w-full flex items-center gap-2.5 px-2 py-2 rounded text-sm transition-colors ${
+                      user?.status === s.value ? 'bg-slate-800 text-slate-100' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                    }`}
+                    data-testid={`status-option-${s.value}`}
+                  >
+                    <span className={`w-2.5 h-2.5 rounded-full ${s.color}`} />
+                    {s.label}
+                  </button>
+                ))}
+              </PopoverContent>
+            </Popover>
             <Tooltip>
               <TooltipTrigger asChild>
                 <button onClick={() => onOpenSettings && onOpenSettings()} className="w-10 h-10 rounded-full bg-slate-800 text-slate-400 hover:text-slate-200 flex items-center justify-center transition-colors" data-testid="user-settings-btn">

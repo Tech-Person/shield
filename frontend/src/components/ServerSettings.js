@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import api from '../lib/api';
-import { X, Plus, Trash2, Copy, UserPlus, ShieldCheck } from 'lucide-react';
+import { X, Plus, Trash2, Copy, UserPlus, ShieldCheck, HardDrive } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Button } from '../components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { ScrollArea } from '../components/ui/scroll-area';
+import { Badge } from '../components/ui/badge';
 
 export default function ServerSettings({ server, onClose, onUpdate }) {
   const [serverName, setServerName] = useState(server?.name || '');
@@ -15,6 +16,21 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
   const [roleName, setRoleName] = useState('');
   const [roleColor, setRoleColor] = useState('#10b981');
   const [inviteCode, setInviteCode] = useState('');
+  const [requestedGb, setRequestedGb] = useState(50);
+  const [requestReason, setRequestReason] = useState('');
+  const [storageRequests, setStorageRequests] = useState([]);
+  const [requestSaving, setRequestSaving] = useState(false);
+
+  useEffect(() => {
+    loadStorageRequests();
+  }, [server?.id]);
+
+  const loadStorageRequests = async () => {
+    try {
+      const { data } = await api.get(`/servers/${server.id}/storage-request`);
+      setStorageRequests(data);
+    } catch {}
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -41,6 +57,18 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
     } catch {}
   };
 
+  const handleRequestStorage = async () => {
+    if (!requestedGb || requestedGb <= 0) return;
+    setRequestSaving(true);
+    try {
+      await api.post(`/servers/${server.id}/storage-request`, { requested_gb: requestedGb, reason: requestReason });
+      setRequestedGb(50);
+      setRequestReason('');
+      loadStorageRequests();
+    } catch {}
+    setRequestSaving(false);
+  };
+
   const handleKick = async (userId) => {
     try {
       await api.post(`/servers/${server.id}/kick/${userId}`);
@@ -64,6 +92,7 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
             <TabsTrigger value="roles" className="data-[state=active]:bg-slate-800 text-slate-400 data-[state=active]:text-slate-100">Roles</TabsTrigger>
             <TabsTrigger value="members" className="data-[state=active]:bg-slate-800 text-slate-400 data-[state=active]:text-slate-100">Members</TabsTrigger>
             <TabsTrigger value="invites" className="data-[state=active]:bg-slate-800 text-slate-400 data-[state=active]:text-slate-100">Invites</TabsTrigger>
+            <TabsTrigger value="storage" className="data-[state=active]:bg-slate-800 text-slate-400 data-[state=active]:text-slate-100">Storage</TabsTrigger>
           </TabsList>
 
           <TabsContent value="general">
@@ -158,6 +187,60 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
                   >
                     <Copy className="w-4 h-4" />
                   </button>
+                </div>
+              )}
+            </div>
+          </TabsContent>
+
+          <TabsContent value="storage">
+            <div className="space-y-6">
+              <div className="p-4 bg-slate-900/50 rounded border border-white/5">
+                <div className="flex items-center gap-2 mb-2">
+                  <HardDrive className="w-4 h-4 text-emerald-500" />
+                  <span className="text-sm text-slate-200">Current Storage</span>
+                </div>
+                <p className="text-xs text-slate-400 font-mono">
+                  Used: {((server?.storage_used_bytes || 0) / (1024 * 1024 * 1024)).toFixed(2)} GB / {((server?.storage_limit_bytes || 0) / (1024 * 1024 * 1024)).toFixed(1)} GB
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <h4 className="text-sm font-medium text-slate-200">Request More Storage</h4>
+                <div className="flex items-end gap-3">
+                  <div>
+                    <Label className="text-slate-300 text-xs">Requested GB</Label>
+                    <Input type="number" value={requestedGb} onChange={e => setRequestedGb(parseFloat(e.target.value) || 50)} className="bg-slate-900 border-white/10 text-slate-100 mt-1 w-28" data-testid="request-storage-gb" />
+                  </div>
+                  <div className="flex-1">
+                    <Label className="text-slate-300 text-xs">Reason</Label>
+                    <Input value={requestReason} onChange={e => setRequestReason(e.target.value)} placeholder="Why do you need more storage?" className="bg-slate-900 border-white/10 text-slate-100 mt-1" data-testid="request-storage-reason" />
+                  </div>
+                </div>
+                <Button onClick={handleRequestStorage} disabled={requestSaving} className="bg-emerald-500 text-slate-950 hover:bg-emerald-400" data-testid="submit-storage-request-btn">
+                  {requestSaving ? 'Submitting...' : 'Submit Request'}
+                </Button>
+              </div>
+
+              {storageRequests.length > 0 && (
+                <div className="space-y-2">
+                  <h4 className="text-sm font-medium text-slate-200">Your Requests</h4>
+                  <ScrollArea className="max-h-48">
+                    {storageRequests.map(r => (
+                      <div key={r.id} className="flex items-center justify-between px-3 py-2 bg-slate-900/30 rounded border border-white/5 mb-1" data-testid={`storage-request-${r.id}`}>
+                        <div>
+                          <p className="text-sm text-slate-200">{r.requested_gb} GB requested</p>
+                          {r.reason && <p className="text-xs text-slate-500">{r.reason}</p>}
+                        </div>
+                        <Badge variant={r.status === 'approved' ? 'default' : r.status === 'denied' ? 'destructive' : 'secondary'} className={
+                          r.status === 'approved' ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' :
+                          r.status === 'denied' ? 'bg-red-500/20 text-red-400 border-red-500/30' :
+                          'bg-slate-700 text-slate-300'
+                        }>
+                          {r.status}
+                        </Badge>
+                      </div>
+                    ))}
+                  </ScrollArea>
                 </div>
               )}
             </div>
