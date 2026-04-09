@@ -19,46 +19,26 @@ User wants a privacy-focused replacement for Discord. Key features: E2E encrypte
 - [x] Server & Channel CRUD (text + voice channels, categories)
 - [x] DMs (1:1 and group), DM search
 - [x] Real-time messaging via WebSockets
-- [x] Message reactions (common emojis)
-- [x] Threads (replies, inherits channel permissions)
-- [x] Typing indicators
-- [x] File uploads (message attachments)
-- [x] GIFs via Giphy API (inline rendering in chat + threads)
-- [x] PWA manifest + service worker
-- [x] Custom Emojis & Stickers — Upload, save to library, use in chat
-- [x] Share Drive — Upload files, create/edit text files, copy links, storage usage bar
-- [x] Server Storage Requests — Owners request more storage, admin approves/denies
-- [x] Quick Status Change — Status popover on user avatar (Online/Away/Busy/Invisible)
-- [x] Escape Key Navigation — Backs out of settings, drive, conversations, servers
-- [x] GIF rendering in threads — Uses MessageContent component
+- [x] Message reactions, Threads (inherits channel perms)
+- [x] Typing indicators, File uploads, GIFs (Giphy), PWA
+- [x] Custom Emojis & Stickers, Share Drive, Storage Requests
+- [x] Quick Status Change, Escape Key Navigation
 
 ### Role Permission System (2026-04-09)
-- [x] **47 permission bit flags** organized in 8 categories:
-  - General Server (9): View Channels, Manage Channels, Manage Roles, Create/Manage Expressions, View Audit Log, View Server Insights, Manage Webhooks, Manage Server
-  - Membership (6): Create Invite, Change/Manage Nicknames, Kick/Ban/Timeout Members
-  - Text Channel (16): Send Messages, Threads, Embed Links, Attach Files, Reactions, External Emoji, Mention Everyone, Manage Messages, Pin Messages, Bypass Slowmode, Manage Threads, Read History, TTS, Voice Messages, Polls
-  - Voice Channel (9): Connect, Speak, Video, Voice Activity, Priority Speaker, Mute/Deafen/Move Members, Set Status
-  - Apps (3): Application Commands, Activities, External Apps
-  - Stage (1): Request to Speak
-  - Events (2): Create/Manage Events
-  - Advanced (1): Administrator (bypasses all checks)
-- [x] **@everyone role** auto-created with default permissions on all servers
-- [x] **Permission enforcement** on: create channel (MANAGE_CHANNELS), send messages (SEND_MESSAGES), kick (KICK_MEMBERS), ban (BAN_MEMBERS), bypass slowmode (BYPASS_SLOWMODE)
-- [x] **Server owner** always has ALL permissions (bypasses role checks)
-- [x] **Discord-style Role Editor UI** — Role list left panel, permission toggles right panel, create/delete roles, clear permissions, save changes
-- [x] **Migration** — Existing servers' @everyone roles updated to new expanded defaults on startup
-- [x] Discarded: Soundboard permissions, Private threads (threads inherit channel permissions)
+- [x] 47 permission bit flags in 8 categories (General, Membership, Text, Voice, Apps, Stage, Events, Advanced)
+- [x] @everyone role auto-created with defaults on all servers
+- [x] Permission enforcement on key endpoints (channels, messages, kick, ban, slowmode)
+- [x] Server owner always has ALL permissions
+- [x] Discord-style Role Editor UI with toggle switches
+- [x] **Role Assignment per Member** — Members tab shows role badges, + Add Role popover to assign, X to remove
+
+### Debian Deployment (2026-04-09)
+- [x] `deploy/install.sh` — Automated installer (MongoDB 7.0, Node.js 20, Python venv, nginx, systemd, Let's Encrypt TLS)
+- [x] `deploy/uninstall.sh` — Clean removal of services and files
+- [x] `deploy/README.md` — Full documentation with configuration, management, troubleshooting
 
 ### Admin
-- [x] Admin Dashboard with stats, charts, server list
-- [x] Storage request approval/denial UI
-- [x] Admin account auto-seeded on startup
-
-### Infrastructure
-- [x] At-rest encryption for text files (Fernet)
-- [x] Emergent Object Storage for files/emojis
-- [x] Brute-force login protection
-- [x] Server invites with codes
+- [x] Admin Dashboard with stats, charts, server list, storage request approval
 
 ## Prioritized Backlog
 
@@ -66,30 +46,21 @@ User wants a privacy-focused replacement for Discord. Key features: E2E encrypte
 - [ ] P2P Voice/Video stream scaling (WebRTC, up to 10 viewers with server fallback)
 - [ ] E2E Encryption validation (hybrid approach, key management)
 - [ ] Read receipts
+- [ ] Extend permission enforcement to more endpoints
 
 ### P2
-- [ ] Debian deployment script (auto-install dependencies, run as service)
 - [ ] Self-destructing status messages (timer-based expiry)
-- [ ] Extend permission enforcement to more endpoints (manage messages, pin, manage roles, manage server, attach files, reactions)
 
 ### P3
 - [ ] Native app skeletons (Linux, Windows, iOS, Android)
 
 ## Architecture
 ```
-/app/backend/server.py       — All API routes (~2050 lines)
-/app/backend/models.py       — Pydantic schemas + Permissions class (47 bit flags)
-/app/backend/encryption.py   — Fernet encryption helpers
-/app/backend/storage_utils.py — Object storage wrapper
-/app/backend/websocket_manager.py — WS state management
-/app/frontend/src/pages/     — MainApp, Login, Register, Admin, Landing
-/app/frontend/src/components/ — ChatArea, ServerSidebar, ChannelSidebar, RoleEditor, ShareDrive, EmojiManager, etc.
-/app/frontend/src/contexts/  — AuthContext (JWT + WS)
+/app/backend/server.py          — All API routes (~2050 lines)
+/app/backend/models.py          — Pydantic schemas + 47-flag Permissions
+/app/backend/encryption.py      — Fernet encryption
+/app/backend/storage_utils.py   — Object storage wrapper
+/app/frontend/src/components/   — ChatArea, RoleEditor, ShareDrive, EmojiManager, etc.
+/app/frontend/src/pages/        — MainApp, Login, Register, Admin, Landing
+/app/deploy/                    — install.sh, uninstall.sh, README.md
 ```
-
-## Key DB Collections
-- `users`, `servers`, `server_members`, `channels`
-- `messages`, `channel_messages`, `thread_replies`, `reactions`
-- `conversations`, `files`, `drive_files`
-- `custom_emojis`, `saved_emojis`, `storage_requests`
-- `invites`, `server_bans`, `passkey_credentials`, `passkey_challenges`
