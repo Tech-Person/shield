@@ -50,6 +50,12 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
 - [x] **Fixed voice not updating live** - VoiceChannel now subscribes to channel on mount; join_voice auto-subscribes in backend
 - [x] **Fixed voice showing users alone** - Same subscription fix enables voice_state_update to reach all participants
 
+#### Voice Persistence Fix (2026-04-09)
+- [x] **Global Voice Manager** (`voiceManager.js`) - WebRTC peer connections, streams, and Audio() elements now live at MainApp level and survive React routing/unmounting
+- [x] **VoiceChannel refactored** - Stripped of local WebRTC state, now a pure UI view consuming voiceManager props
+- [x] **VoiceFloat widget** (`VoiceFloat.js`) - Persistent floating bottom-left panel with mute/deafen/disconnect controls visible on all screens when in a voice call
+- [x] **Navigate-back** - Clicking the float returns user to the active voice channel view
+
 #### P2 Features (Pending)
 - [ ] Self-destructing status messages
 
