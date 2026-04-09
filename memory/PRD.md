@@ -40,26 +40,34 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
 - [x] Debian deployment package (install.sh, uninstall.sh)
 - [x] UI-driven self-update from GitHub
 - [x] Dynamic frontend API URL for self-hosting
-- [x] **End-to-End Encryption (E2E)** - RSA-OAEP/AES-GCM, multi-device, key backup/restore
-- [x] **TURN Server Management** - Admin controls for coturn Docker container
-- [x] **WebRTC P2P Voice/Video** - TURN credential integration, connection state monitoring, 10-participant cap
+- [x] End-to-End Encryption (E2E) - RSA-OAEP/AES-GCM, multi-device, key backup/restore
+- [x] TURN Server Management - Admin controls for coturn Docker container
+- [x] WebRTC P2P Voice/Video - TURN credential integration, connection state monitoring, 10-participant cap
+
+#### Bug Fixes (2026-04-09)
+- [x] Fixed double message receives in DMs (removed redundant broadcast_dm)
+- [x] Fixed messages requiring page reload (dedup in WS handler)
+- [x] Fixed file uploads showing [File:Filename] text (proper attachment rendering with download links/image previews)
+- [x] Fixed status message save (added Save Status button)
+- [x] Fixed server settings not closing on channel click
+- [x] Fixed display name not syncing to server members
+- [x] Fixed status updates not broadcasting to server members (real-time via channels)
+- [x] Fixed new DM not appearing in list (loadConversations called after DM create)
+- [x] Added voice channel join/leave sounds (Web Audio API synthesis)
+- [x] Added speaking indicator (green glow on avatar when talking)
+- [x] Added interactive copy invite link (Popover dropdown with toast)
+- [x] Added channel settings gear per channel (visible to managers only)
+- [x] Added group DM creation dialog
+- [x] Added voice persistence across navigation (voice bar when browsing other views)
+- [x] Improved members panel (online/offline sections, status colors, tooltips)
+- [x] Added server invites GET endpoint
 
 #### P2 Features (Pending)
 - [ ] Self-destructing status messages
+- [ ] DM voice/video calls
 
 #### P3 Features (Pending)
 - [ ] Native app skeletons (Linux, Windows, iOS, Android)
 
-### E2E Encryption Design
-- **Key Generation**: RSA-OAEP 2048-bit key pair generated per device on login
-- **Private Key Storage**: IndexedDB (never leaves device)
-- **Public Key Distribution**: Uploaded to server, fetched as key bundles
-- **Message Flow**: AES-256-GCM symmetric key per message, wrapped with each recipient device's RSA public key
-- **Multi-Device**: Each device has unique key pair; key backup (PBKDF2 600k iterations + AES-GCM passphrase encryption) enables cross-device restore
-- **Backward Compatible**: Old server-encrypted messages still readable; new messages use E2E
-
-### TURN Server
-- Managed via Docker (coturn container)
-- Admin dashboard: start/stop/status controls, config editor
-- Time-limited HMAC credentials for clients
-- Required ports: UDP 3478, TCP 3478/3479, UDP 49152-65535
+### Refactoring Notes
+- `server.py` is 2870+ lines. Should be split into modular routers (auth.py, messaging.py, admin.py, voice.py, keys.py)
