@@ -1,6 +1,6 @@
 {
-  "short_name": "SecureComm",
-  "name": "SecureComm - Encrypted Communication",
+  "short_name": "Shield",
+  "name": "Shield - Encrypted Communication",
   "description": "A privacy-focused, self-hosted communication platform with end-to-end encryption.",
   "icons": [
     {

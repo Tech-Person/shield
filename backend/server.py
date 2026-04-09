@@ -37,7 +37,7 @@ mongo_url = os.environ['MONGO_URL']
 client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ['DB_NAME']]
 
-app = FastAPI(title="SecureComm API")
+app = FastAPI(title="Shield API")
 api_router = APIRouter(prefix="/api")
 
 JWT_SECRET = os.environ['JWT_SECRET']
@@ -219,7 +219,7 @@ async def setup_2fa(request: Request):
     user = await get_current_user(request)
     secret = pyotp.random_base32()
     totp = pyotp.TOTP(secret)
-    uri = totp.provisioning_uri(name=user["email"], issuer_name="SecureComm")
+    uri = totp.provisioning_uri(name=user["email"], issuer_name="Shield")
     qr = qrcode.make(uri)
     buf = io.BytesIO()
     qr.save(buf, format="PNG")
@@ -1156,7 +1156,7 @@ async def check_for_updates(request: Request):
         "current_version": "1.0.0",
         "latest_version": "1.0.0",
         "update_available": False,
-        "release_url": "https://github.com/securecomm/securecomm/releases",
+        "release_url": "https://github.com/shield/shield/releases",
         "changelog": "Initial release with encrypted messaging, servers, channels, voice/video, and share drives."
     }
 
@@ -1216,7 +1216,7 @@ from webauthn.helpers.structs import AuthenticatorSelectionCriteria, UserVerific
 from webauthn.helpers import bytes_to_base64url, base64url_to_bytes
 
 WEBAUTHN_RP_ID = os.environ.get("WEBAUTHN_RP_ID", "localhost")
-WEBAUTHN_RP_NAME = "SecureComm"
+WEBAUTHN_RP_NAME = "Shield"
 WEBAUTHN_ORIGIN = os.environ.get("WEBAUTHN_ORIGIN", "http://localhost:3000")
 
 @api_router.post("/auth/passkey/register/begin")
@@ -1975,36 +1975,43 @@ async def startup():
     await db.storage_requests.create_index("server_id")
     await db.storage_requests.create_index("status")
 
-    admin_email = os.environ.get("ADMIN_EMAIL", "admin@securecomm.local")
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@shield.local")
     admin_password = os.environ.get("ADMIN_PASSWORD", "SecureAdmin2024!")
     existing = await db.users.find_one({"email": admin_email})
     if not existing:
-        admin_id = str(uuid.uuid4())
-        await db.users.insert_one({
-            "id": admin_id,
-            "username": "admin",
-            "username_lower": "admin",
-            "email": admin_email,
-            "password_hash": hash_password(admin_password),
-            "display_name": "Admin",
-            "avatar_url": None,
-            "about": "System Administrator",
-            "status": "online",
-            "status_message": None,
-            "status_message_expires": None,
-            "totp_enabled": False,
-            "totp_secret": None,
-            "role": "admin",
-            "friends": [],
-            "blocked": [],
-            "friend_requests_sent": [],
-            "friend_requests_received": [],
-            "storage_used_bytes": 0,
-            "storage_limit_bytes": 5 * 1024 * 1024 * 1024,
-            "last_active": datetime.now(timezone.utc).isoformat(),
-            "created_at": datetime.now(timezone.utc).isoformat()
-        })
-        logger.info(f"Admin user created: {admin_email}")
+        # Check if an admin user exists with old email or same username
+        existing_admin = await db.users.find_one({"username_lower": "admin", "role": "admin"})
+        if existing_admin:
+            # Update existing admin's email to the new one
+            await db.users.update_one({"username_lower": "admin", "role": "admin"}, {"$set": {"email": admin_email, "password_hash": hash_password(admin_password)}})
+            logger.info(f"Admin user email updated to: {admin_email}")
+        else:
+            admin_id = str(uuid.uuid4())
+            await db.users.insert_one({
+                "id": admin_id,
+                "username": "admin",
+                "username_lower": "admin",
+                "email": admin_email,
+                "password_hash": hash_password(admin_password),
+                "display_name": "Admin",
+                "avatar_url": None,
+                "about": "System Administrator",
+                "status": "online",
+                "status_message": None,
+                "status_message_expires": None,
+                "totp_enabled": False,
+                "totp_secret": None,
+                "role": "admin",
+                "friends": [],
+                "blocked": [],
+                "friend_requests_sent": [],
+                "friend_requests_received": [],
+                "storage_used_bytes": 0,
+                "storage_limit_bytes": 5 * 1024 * 1024 * 1024,
+                "last_active": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat()
+            })
+            logger.info(f"Admin user created: {admin_email}")
     elif not verify_password(admin_password, existing["password_hash"]):
         await db.users.update_one({"email": admin_email}, {"$set": {"password_hash": hash_password(admin_password)}})
 
@@ -2034,7 +2041,7 @@ async def startup():
                 {"$addToSet": {"roles": everyone_role["id"]}}
             )
 
-    logger.info("SecureComm API started successfully")
+    logger.info("Shield API started successfully")
 
 @app.on_event("shutdown")
 async def shutdown():

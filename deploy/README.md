@@ -1,16 +1,46 @@
-# SecureComm — Debian Deployment Guide
+# Shield — Debian Deployment Guide
+
+## Files to Transfer
+
+Copy these three folders to your server (keeping this structure):
+
+```
+shield/
+├── backend/          ← Entire backend folder
+├── frontend/         ← Entire frontend folder (including node_modules or not — installer runs yarn)
+└── deploy/           ← This folder
+    ├── install.sh
+    ├── uninstall.sh
+    └── README.md
+```
+
+**Example using rsync:**
+```bash
+rsync -avz --exclude='frontend/node_modules' --exclude='frontend/build' \
+    --exclude='backend/__pycache__' --exclude='backend/venv' \
+    backend/ frontend/ deploy/ user@your-server:~/shield/
+```
+
+**Or using scp:**
+```bash
+scp -r backend frontend deploy user@your-server:~/shield/
+```
+
+> The `deploy/` folder alone is NOT enough. The script reads `../backend` and `../frontend` relative to itself.
 
 ## Quick Start
 
 ```bash
+cd ~/shield
 sudo bash deploy/install.sh
 ```
 
-That's it. The script handles everything:
-- Installs system dependencies (Node.js 20, Python 3, nginx, MongoDB 7.0)
-- Sets up the Python virtual environment and installs backend packages
+The script handles everything automatically:
+- Installs system dependencies (Node.js 20, Python 3, nginx)
+- Installs MongoDB 7.0
+- Sets up Python virtual environment and backend packages
 - Builds the React frontend for production
-- Configures nginx as a reverse proxy (API + WebSocket + static SPA)
+- Configures nginx as a reverse proxy (API + WebSocket + SPA)
 - Creates a systemd service for the backend
 - Optionally sets up HTTPS via Let's Encrypt
 
@@ -26,13 +56,14 @@ That's it. The script handles everything:
 
 ## Configuration
 
-Override defaults with environment variables before running the script:
+Override defaults with environment variables **before** running the script:
 
 ```bash
-export SECURECOMM_DOMAIN="chat.example.com"     # Default: localhost
-export SECURECOMM_ADMIN_EMAIL="you@example.com"  # Default: admin@securecomm.local
-export SECURECOMM_ADMIN_PASSWORD="YourPassword"   # Default: random 16-char
-export SECURECOMM_DIR="/opt/securecomm"           # Default: /opt/securecomm
+export SHIELD_DOMAIN="chat.example.com"       # Default: localhost
+export SHIELD_ADMIN_EMAIL="you@example.com"    # Default: admin@shield.local
+export SHIELD_ADMIN_PASSWORD="YourPassword"     # Default: random 16-char
+export SHIELD_DIR="/opt/shield"                 # Default: /opt/shield
+export SHIELD_DB_NAME="shield"                  # Default: shield
 sudo -E bash deploy/install.sh
 ```
 
@@ -42,26 +73,26 @@ sudo -E bash deploy/install.sh
 
 | Component | Location |
 |-----------|----------|
-| Application | `/opt/securecomm/` |
-| Backend service | `securecomm-backend.service` (systemd) |
-| nginx config | `/etc/nginx/sites-available/securecomm` |
-| Backend .env | `/opt/securecomm/backend/.env` |
-| Frontend build | `/opt/securecomm/frontend/build/` |
+| Application | `/opt/shield/` |
+| Backend service | `shield-backend.service` (systemd) |
+| nginx config | `/etc/nginx/sites-available/shield` |
+| Backend .env | `/opt/shield/backend/.env` |
+| Frontend build | `/opt/shield/frontend/build/` |
 | MongoDB data | `/var/lib/mongodb/` (default) |
 
 ## Managing Services
 
 ```bash
 # Status
-sudo systemctl status securecomm-backend
+sudo systemctl status shield-backend
 sudo systemctl status nginx
 sudo systemctl status mongod
 
 # Restart
-sudo systemctl restart securecomm-backend
+sudo systemctl restart shield-backend
 
 # View logs
-sudo journalctl -u securecomm-backend -f
+sudo journalctl -u shield-backend -f
 sudo journalctl -u mongod -f
 ```
 
@@ -73,38 +104,31 @@ The installer prompts for Let's Encrypt setup if your domain is not `localhost`.
 sudo certbot --nginx -d your-domain.com
 ```
 
-Certbot auto-renews via a systemd timer. Verify with:
-```bash
-sudo certbot renew --dry-run
-```
-
 ## Updating
 
-To update SecureComm after pulling new code:
-
 ```bash
-cd /path/to/securecomm-source
+cd ~/shield-source
 
 # Update backend
-cp -r backend/* /opt/securecomm/backend/
-source /opt/securecomm/backend/venv/bin/activate
-pip install -r /opt/securecomm/backend/requirements.txt
+cp -r backend/* /opt/shield/backend/
+source /opt/shield/backend/venv/bin/activate
+pip install -r /opt/shield/backend/requirements.txt
 deactivate
-sudo systemctl restart securecomm-backend
+sudo systemctl restart shield-backend
 
 # Update frontend
-cp -r frontend/src frontend/public frontend/package.json frontend/yarn.lock /opt/securecomm/frontend/
-cd /opt/securecomm/frontend && yarn install && yarn build
+cp -r frontend/src frontend/public frontend/package.json frontend/yarn.lock /opt/shield/frontend/
+cd /opt/shield/frontend && yarn install && yarn build
 sudo systemctl restart nginx
 ```
 
 ## Uninstalling
 
 ```bash
-sudo bash /opt/securecomm/deploy/uninstall.sh
+sudo bash /opt/shield/deploy/uninstall.sh
 ```
 
-This removes services and application files. MongoDB and its data are preserved (manual removal instructions provided).
+Removes services and application files. MongoDB and its data are preserved.
 
 ## Firewall
 
@@ -120,9 +144,9 @@ sudo ufw enable
 
 | Issue | Fix |
 |-------|-----|
-| Backend won't start | Check `.env` file: `cat /opt/securecomm/backend/.env` |
+| Backend won't start | `cat /opt/shield/backend/.env` — check credentials |
 | MongoDB not running | `sudo systemctl start mongod && journalctl -u mongod` |
-| nginx 502 | Backend not running: `sudo systemctl restart securecomm-backend` |
-| WebSocket fails | Check nginx config has `/ws` proxy block |
-| Permission denied | Ensure script was run with `sudo` |
-| Let's Encrypt fails | DNS must point to this server, port 80 must be open |
+| nginx 502 | Backend not running: `sudo systemctl restart shield-backend` |
+| WebSocket fails | Verify nginx `/ws` proxy block exists |
+| Permission denied | Run with `sudo` |
+| Let's Encrypt fails | DNS must point to server, port 80 open |

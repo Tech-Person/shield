@@ -9,7 +9,7 @@ def get_fernet_key():
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),
         length=32,
-        salt=b'securecomm-salt-v1',
+        salt=b'shield-salt-v1',
         iterations=100000,
     )
     key = base64.urlsafe_b64encode(kdf.derive(key_material.encode()))

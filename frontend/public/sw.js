@@ -1,4 +1,4 @@
-const CACHE_NAME = 'securecomm-v1';
+const CACHE_NAME = 'shield-v1';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

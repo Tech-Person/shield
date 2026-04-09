@@ -41,7 +41,7 @@ export default function RegisterPage() {
       <div className="w-full max-w-md">
         <div className="flex items-center justify-center gap-3 mb-8">
           <Shield className="w-8 h-8 text-emerald-500" />
-          <span className="text-2xl font-medium tracking-tight text-slate-50 font-['Outfit']">SecureComm</span>
+          <span className="text-2xl font-medium tracking-tight text-slate-50 font-['Outfit']">Shield</span>
         </div>
 
         <div className="bg-slate-900/80 backdrop-blur-2xl border border-white/5 rounded-lg p-8">

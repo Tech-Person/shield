@@ -21,7 +21,7 @@ export default function LandingPage() {
         <nav className="flex items-center justify-between px-8 py-6 max-w-7xl mx-auto">
           <div className="flex items-center gap-3">
             <Shield className="w-8 h-8 text-emerald-500" />
-            <span className="text-xl font-medium tracking-tight font-['Outfit']">SecureComm</span>
+            <span className="text-xl font-medium tracking-tight font-['Outfit']">Shield</span>
           </div>
           <div className="flex items-center gap-4">
             <Button variant="ghost" className="text-slate-300 hover:text-white hover:bg-slate-800/50" onClick={() => navigate('/login')} data-testid="nav-login-btn">

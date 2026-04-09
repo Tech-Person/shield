@@ -6,7 +6,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
-APP_NAME = "securecomm"
+APP_NAME = "shield"
 storage_key = None
 
 
