@@ -159,11 +159,12 @@ async def register(data: UserCreate, response: Response):
 @api_router.post("/auth/login")
 async def login(data: UserLogin, request: Request, response: Response):
     email = data.email.lower().strip()
-    ip = request.client.host if request.client else "unknown"
+    # Use real client IP from reverse proxy header
+    ip = request.headers.get("x-real-ip") or request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
     identifier = f"{ip}:{email}"
 
     attempt = await db.login_attempts.find_one({"identifier": identifier}, {"_id": 0})
-    if attempt and attempt.get("count", 0) >= 5:
+    if attempt and attempt.get("count", 0) >= 10:
         locked_until = attempt.get("locked_until")
         if locked_until and datetime.fromisoformat(locked_until) > datetime.now(timezone.utc):
             raise HTTPException(429, "Too many attempts. Try again in 15 minutes.")
@@ -2295,6 +2296,8 @@ async def startup():
     await db.drive_files.create_index("id", unique=True)
     await db.drive_files.create_index("server_id")
     await db.login_attempts.create_index("identifier")
+    # Clear any stale login lockouts on restart
+    await db.login_attempts.delete_many({})
     await db.reactions.create_index("message_id")
     await db.reactions.create_index([("message_id", 1), ("emoji", 1), ("user_id", 1)], unique=True)
     await db.thread_replies.create_index("parent_message_id")
