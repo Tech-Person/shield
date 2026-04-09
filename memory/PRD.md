@@ -1,71 +1,80 @@
-# SecureComm - Privacy-Focused Discord Replacement
+# SecureComm - Privacy-Focused Communication Platform (PRD)
 
-## Architecture
-- **Backend**: FastAPI (Python) with MongoDB (Motor async driver)
-- **Frontend**: React with Tailwind CSS, Shadcn/UI components
-- **Real-time**: WebSocket (FastAPI native)
-- **Encryption**: AES-256 (Fernet) for messages at rest
-- **Storage**: Emergent Object Storage for file uploads
-- **Auth**: JWT (httpOnly cookies) + 2FA (TOTP) + Passkeys (WebAuthn)
-- **Voice/Video**: WebRTC (P2P with STUN)
-- **GIFs**: GIPHY API (proxied through backend)
-- **PWA**: Service worker + manifest for installable app
+## Original Problem Statement
+User wants a privacy-focused replacement for Discord. Key features: E2E encrypted (hybrid approach - encrypted at rest on server), servers, roles, text/voice channels, DMs, friends list. Voice/video streaming (P2P preferred, server fallback, up to 10 viewers). Share drive for servers (25GB limit, files can be added/removed, simple text file creation). User media limit 5GB. Web UI + PWA, with a deployable package for Debian. Features include message reactions, threads, GIFs, typing indicators, read receipts, admin GUI (locked behind passkey/admin), user statuses (Online/Away/Busy/Invisible), and self-destructing status messages.
 
-## All Implemented Features
+## Tech Stack
+- Frontend: React + Tailwind CSS + Shadcn UI
+- Backend: FastAPI (Python)
+- Database: MongoDB
+- Real-time: WebSockets
+- Auth: JWT cookies + WebAuthn (Passkeys)
+- Storage: Emergent Object Storage
+- Encryption: At-rest encryption (Fernet)
 
-### Auth & Security
-- Registration, login with JWT httpOnly cookies
-- 2FA (TOTP with QR code)
-- Passkey/WebAuthn registration and authentication
-- Brute force protection (5 attempts = 15min lockout)
-- AES-256 message encryption at rest
+## Implemented Features (as of 2026-04-09)
 
-### Messaging
-- DMs (1-on-1 and group)
-- Channel messages with slowmode
-- GIF search & inline sending (GIPHY API)
-- Emoji reactions (12 common emojis)
-- Threaded replies
-- Message edit/delete (own messages)
-- File attachments via object storage
-- Encrypted message search
-- Typing indicators via WebSocket
+### Core
+- [x] Auth system (Login, Register, 2FA/TOTP, Passkeys/WebAuthn)
+- [x] Server & Channel CRUD (text + voice channels, categories)
+- [x] DMs (1:1 and group), DM search
+- [x] Real-time messaging via WebSockets
+- [x] Message reactions (common emojis)
+- [x] Threads (replies)
+- [x] Typing indicators
+- [x] File uploads (message attachments)
+- [x] GIFs via Giphy API (inline rendering in chat + threads)
+- [x] PWA manifest + service worker
 
-### Servers
-- Server CRUD, channels, roles, permissions
-- Text + voice channels
-- Invite codes with expiry/max uses
-- Member kick/ban
-- Share drive with storage limits (5GB user, 25GB server)
-- Role-based permission system
+### Latest Batch (2026-04-09)
+- [x] **Custom Emojis & Stickers** — Upload, save to library, use in chat (renders inline)
+- [x] **Share Drive** — Full UI: upload files, create/edit text files, copy links, delete, storage usage bar
+- [x] **Server Storage Requests** — Owners request more storage, admin approves/denies in dashboard
+- [x] **Quick Status Change** — Status popover on user avatar (Online/Away/Busy/Invisible)
+- [x] **Escape Key Navigation** — Backs out of settings, drive, conversations, servers
+- [x] **GIF rendering in threads** — Fixed: threads now use MessageContent component
 
-### Voice/Video
-- WebRTC voice channels with P2P
-- Video with quality selector (480p-2160p, 30-60fps)
-- Screen sharing via getDisplayMedia
-- Mute/video/screen share controls
+### Admin
+- [x] Admin Dashboard with stats, charts, server list
+- [x] Storage request approval/denial UI
+- [x] Admin account auto-seeded on startup
 
-### Platform
-- Admin dashboard with stats + charts
-- User status (Online/Away/Busy/Invisible) with auto-AFK
-- Custom status messages with expiration
-- Desktop notifications (browser Notification API)
-- PWA manifest + service worker
-- Update check endpoint
+### Infrastructure
+- [x] At-rest encryption for text files (Fernet)
+- [x] Emergent Object Storage for files/emojis
+- [x] Brute-force login protection
+- [x] Role/permission system (framework)
+- [x] Server invites with codes
 
 ## Prioritized Backlog
-### P0
-- TURN server relay for NAT traversal
-- Debian deployment package skeleton
 
 ### P1
-- Native app skeletons (Electron/Tauri)
-- GitHub-based auto-update polling
-- Channel permission overrides
-- Message pinning
-- Rich text/markdown rendering
+- [ ] P2P Voice/Video stream scaling (WebRTC, up to 10 viewers with server fallback)
+- [ ] E2E Encryption validation (hybrid approach, key management)
+- [ ] Read receipts
 
 ### P2
-- User profile popover cards
-- DM calling (voice/video in DMs)
-- Push notifications (FCM/APNs)
+- [ ] Debian deployment script (auto-install dependencies, run as service)
+- [ ] Self-destructing status messages (timer-based expiry)
+
+### P3
+- [ ] Native app skeletons (Linux, Windows, iOS, Android)
+- [ ] Public server discovery (deferred per user)
+
+## Architecture
+```
+/app/backend/server.py       — All API routes (~1985 lines)
+/app/backend/encryption.py   — Fernet encryption helpers
+/app/backend/storage_utils.py — Object storage wrapper
+/app/backend/websocket_manager.py — WS state management
+/app/frontend/src/pages/     — MainApp, Login, Register, Admin, Landing
+/app/frontend/src/components/ — ChatArea, ServerSidebar, ChannelSidebar, ShareDrive, EmojiManager, etc.
+/app/frontend/src/contexts/  — AuthContext (JWT + WS)
+```
+
+## Key DB Collections
+- `users`, `servers`, `server_members`, `channels`
+- `messages`, `channel_messages`, `thread_replies`, `reactions`
+- `conversations`, `files`, `drive_files`
+- `custom_emojis`, `saved_emojis`, `storage_requests`
+- `invites`, `server_bans`, `passkey_credentials`, `passkey_challenges`

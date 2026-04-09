@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../lib/api';
 import ServerSidebar from '../components/ServerSidebar';
@@ -42,16 +42,19 @@ export default function MainApp() {
     } catch {}
   }, []);
 
+  const activeChannelRef = useRef(activeChannel);
+  activeChannelRef.current = activeChannel;
+
   const loadServerData = useCallback(async (serverId) => {
     try {
       const { data } = await api.get(`/servers/${serverId}`);
       setServerData(data);
-      if (data.channels?.length > 0 && !activeChannel) {
+      if (data.channels?.length > 0 && !activeChannelRef.current) {
         const textChannels = data.channels.filter(c => c.channel_type === 'text');
         if (textChannels.length > 0) setActiveChannel(textChannels[0]);
       }
     } catch {}
-  }, [activeChannel]);
+  }, []);
 
   useEffect(() => {
     loadServers();
