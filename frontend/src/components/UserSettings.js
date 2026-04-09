@@ -147,6 +147,22 @@ export default function UserSettings({ onClose }) {
               <Label className="text-slate-300 text-sm">Expires in (minutes)</Label>
               <Input type="number" value={statusExpiry} onChange={e => setStatusExpiry(parseInt(e.target.value) || 60)} className="bg-slate-900 border-white/10 text-slate-100 mt-1.5 w-32" data-testid="status-expiry-input" />
             </div>
+            <Button
+              onClick={async () => {
+                try {
+                  await api.put('/users/me/status', {
+                    status,
+                    status_message: statusMessage || null,
+                    status_expires_minutes: statusMessage ? statusExpiry : null
+                  });
+                  setUser(prev => ({ ...prev, status, status_message: statusMessage || null }));
+                } catch {}
+              }}
+              className="bg-emerald-500 text-slate-950 hover:bg-emerald-400 h-9"
+              data-testid="save-status-btn"
+            >
+              Save Status
+            </Button>
           </div>
         </section>
 

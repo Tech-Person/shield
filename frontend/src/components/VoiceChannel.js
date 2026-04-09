@@ -4,8 +4,9 @@ import { Mic, MicOff, Video, VideoOff, Monitor, PhoneOff, Settings, Users, Volum
 import { Button } from '../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { ScrollArea } from '../components/ui/scroll-area';
+import { playJoinSound, playLeaveSound, createAudioLevelDetector } from '../lib/audio';
 
-export default function VoiceChannel({ channel, server, user, ws }) {
+export default function VoiceChannel({ channel, server, user, ws, onVoiceJoin, onVoiceLeave }) {
   const [joined, setJoined] = useState(false);
   const [participants, setParticipants] = useState([]);
   const [muted, setMuted] = useState(false);
@@ -13,11 +14,13 @@ export default function VoiceChannel({ channel, server, user, ws }) {
   const [screenSharing, setScreenSharing] = useState(false);
   const [videoQuality, setVideoQuality] = useState('720p');
   const [showSettings, setShowSettings] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
   const localVideoRef = useRef(null);
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
   const iceServersRef = useRef(null);
+  const audioDetectorCleanupRef = useRef(null);
 
   // Fetch TURN/STUN credentials
   useEffect(() => {
@@ -55,6 +58,9 @@ export default function VoiceChannel({ channel, server, user, ws }) {
         const data = JSON.parse(event.data);
         if (data.type === 'voice_state_update' && data.channel_id === channel.id) {
           loadParticipants();
+          // Play sounds for other users joining/leaving
+          if (data.user_joined && data.user_joined !== user.id && joined) playJoinSound();
+          if (data.user_left && data.user_left !== user.id && joined) playLeaveSound();
           // Clean up peer connections for users who left
           if (data.user_left) {
             const leftUserId = data.user_left;
@@ -176,6 +182,10 @@ export default function VoiceChannel({ channel, server, user, ws }) {
       localStreamRef.current = stream;
       ws?.current?.send(JSON.stringify({ type: 'join_voice', channel_id: channel.id }));
       setJoined(true);
+      if (onVoiceJoin) onVoiceJoin();
+      playJoinSound();
+      // Start speaking detection
+      audioDetectorCleanupRef.current = createAudioLevelDetector(stream, setSpeaking);
       // Initiate connections to existing participants
       setTimeout(() => {
         participants.forEach(p => {
@@ -209,10 +219,15 @@ export default function VoiceChannel({ channel, server, user, ws }) {
     peerConnectionsRef.current = {};
     localStreamRef.current = null;
     screenStreamRef.current = null;
+    if (audioDetectorCleanupRef.current) audioDetectorCleanupRef.current();
+    audioDetectorCleanupRef.current = null;
+    setSpeaking(false);
     setJoined(false);
     setMuted(false);
     setVideoOn(false);
     setScreenSharing(false);
+    if (onVoiceLeave) onVoiceLeave();
+    playLeaveSound();
   };
 
   const toggleMute = () => {
@@ -343,7 +358,7 @@ export default function VoiceChannel({ channel, server, user, ws }) {
             {/* Video grid */}
             <div className="flex-1 grid grid-cols-2 lg:grid-cols-3 gap-3 mb-4" id="remote-streams">
               {/* Local video */}
-              <div className="relative bg-slate-900/50 rounded-lg border border-white/5 aspect-video flex items-center justify-center overflow-hidden">
+              <div className={`relative bg-slate-900/50 rounded-lg border aspect-video flex items-center justify-center overflow-hidden transition-all duration-200 ${speaking ? 'border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.3)]' : 'border-white/5'}`}>
                 {videoOn || screenSharing ? (
                   <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" data-testid="local-video" />
                 ) : (

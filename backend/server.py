@@ -303,6 +303,12 @@ async def update_profile(data: UserUpdate, request: Request):
     updates = {k: v for k, v in data.model_dump(exclude_unset=True).items()}
     if updates:
         await db.users.update_one({"id": user["id"]}, {"$set": updates})
+        # Sync display_name to all server_members
+        if "display_name" in updates:
+            await db.server_members.update_many(
+                {"user_id": user["id"]},
+                {"$set": {"display_name": updates["display_name"]}}
+            )
     updated = await db.users.find_one({"id": user["id"]}, {"_id": 0, "password_hash": 0, "totp_secret": 0})
     return updated
 
@@ -319,10 +325,20 @@ async def update_status(data: StatusUpdate, request: Request):
         else:
             updates["status_message_expires"] = None
     await db.users.update_one({"id": user["id"]}, {"$set": updates})
+    # Broadcast status to friends
     await manager.broadcast_to_users(
         user.get("friends", []),
         {"type": "status_update", "user_id": user["id"], "status": data.status, "status_message": data.status_message}
     )
+    # Broadcast status to all servers the user is a member of
+    memberships = await db.server_members.find({"user_id": user["id"]}, {"_id": 0, "server_id": 1}).to_list(100)
+    for m in memberships:
+        channels = await db.channels.find({"server_id": m["server_id"]}, {"_id": 0, "id": 1}).to_list(100)
+        for ch in channels:
+            await manager.broadcast_channel(ch["id"], {
+                "type": "member_status_update", "user_id": user["id"],
+                "status": data.status, "is_online": data.status != "invisible"
+            })
     return {"message": "Status updated"}
 
 @api_router.get("/users/search")
@@ -805,6 +821,11 @@ async def get_server(server_id: str, request: Request):
     members = await db.server_members.find({"server_id": server_id}, {"_id": 0}).to_list(1000)
     for m in members:
         m["is_online"] = manager.is_online(m["user_id"])
+        # Fetch live status from users collection
+        u = await db.users.find_one({"id": m["user_id"]}, {"_id": 0, "status": 1, "status_message": 1})
+        if u:
+            m["status"] = u.get("status", "offline")
+            m["status_message"] = u.get("status_message")
     server["channels"] = channels
     server["members"] = members
     server["member_count"] = len(members)
@@ -873,6 +894,17 @@ async def create_invite(server_id: str, data: InviteCreate, request: Request):
     await db.invites.insert_one(invite)
     invite.pop("_id", None)
     return invite
+
+
+@api_router.get("/servers/{server_id}/invites")
+async def get_server_invites(server_id: str, request: Request):
+    user = await get_current_user(request)
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    invites = await db.invites.find({"server_id": server_id}, {"_id": 0}).to_list(50)
+    return invites
+
 
 @api_router.post("/invites/{code}/join")
 async def join_server(code: str, request: Request):

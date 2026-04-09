@@ -11,7 +11,8 @@ import UserSettings from '../components/UserSettings';
 import ServerSettings from '../components/ServerSettings';
 import ShareDrive from '../components/ShareDrive';
 import VoiceChannel from '../components/VoiceChannel';
-import { Menu, X } from 'lucide-react';
+import ChannelSettings from '../components/ChannelSettings';
+import { Menu, X, PhoneOff, Mic } from 'lucide-react';
 
 export default function MainApp() {
   const { user, ws } = useAuth();
@@ -27,6 +28,9 @@ export default function MainApp() {
   const [showServerSettings, setShowServerSettings] = useState(false);
   const [showDrive, setShowDrive] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [channelSettings, setChannelSettings] = useState(null); // channel being edited
+  // Persistent voice state - survives navigation
+  const [voiceState, setVoiceState] = useState(null); // { serverId, channelId, channelName }
 
   const loadServers = useCallback(async () => {
     try {
@@ -90,22 +94,24 @@ export default function MainApp() {
     const handler = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'new_message' || data.type === 'channel_message') {
+        if (data.type === 'new_message') {
           loadConversations();
-        } else if (data.type === 'friend_request' || data.type === 'friend_accepted') {
-          // handled by FriendsList
+        } else if (data.type === 'member_status_update' || data.type === 'status_update') {
+          // Refresh server data to update member online status
+          if (activeServer) loadServerData(activeServer);
         }
       } catch {}
     };
     websocket.addEventListener('message', handler);
     return () => websocket.removeEventListener('message', handler);
-  }, [ws, loadConversations]);
+  }, [ws, loadConversations, activeServer, loadServerData]);
 
   const handleSelectServer = (serverId) => {
     setActiveServer(serverId);
     setActiveConversation(null);
     setActiveChannel(null);
     setShowDrive(false);
+    setShowServerSettings(false);
     setMobileMenuOpen(false);
   };
 
@@ -115,6 +121,7 @@ export default function MainApp() {
     setActiveChannel(null);
     setActiveView('dms');
     setShowDrive(false);
+    setShowServerSettings(false);
     setMobileMenuOpen(false);
   };
 
@@ -125,20 +132,43 @@ export default function MainApp() {
     setActiveConversation(null);
     setActiveView('friends');
     setShowDrive(false);
+    setShowServerSettings(false);
     setMobileMenuOpen(false);
   };
 
   const handleSelectConversation = (conv) => {
     setActiveConversation(conv);
     setActiveView('dms');
+    setShowServerSettings(false);
     setMobileMenuOpen(false);
   };
 
   const handleSelectChannel = (channel) => {
     setActiveChannel(channel);
     setShowDrive(false);
+    setShowServerSettings(false);
+    setChannelSettings(null);
     setMobileMenuOpen(false);
   };
+
+  const handleStartDM = (conv) => {
+    setActiveConversation(conv);
+    setActiveView('dms');
+    loadConversations();
+  };
+
+  const handleVoiceJoin = (serverId, channel) => {
+    setVoiceState({ serverId, channelId: channel.id, channelName: channel.name });
+  };
+
+  const handleVoiceLeave = () => {
+    setVoiceState(null);
+  };
+
+  // Determine if we should show voice channel view
+  const showVoiceView = activeServer && activeChannel?.channel_type === 'voice';
+  // Determine if persistent voice bar should show (connected to voice but viewing something else)
+  const showVoiceBar = voiceState && !(showVoiceView && voiceState.channelId === activeChannel?.id);
 
   return (
     <div className="h-screen w-full flex overflow-hidden bg-[#020617]" data-testid="main-app">
@@ -172,6 +202,8 @@ export default function MainApp() {
             onOpenSettings={() => setShowServerSettings(true)}
             onOpenDrive={() => { setShowDrive(true); setActiveChannel(null); }}
             user={user}
+            onChannelCreated={() => loadServerData(activeServer)}
+            onOpenChannelSettings={(ch) => { setChannelSettings(ch); setActiveChannel(null); }}
           />
         ) : (
           <DMList
@@ -187,21 +219,49 @@ export default function MainApp() {
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-w-0">
+        {/* Persistent voice bar */}
+        {showVoiceBar && (
+          <div className="h-10 bg-emerald-500/10 border-b border-emerald-500/20 flex items-center justify-between px-4 flex-shrink-0" data-testid="voice-bar">
+            <div className="flex items-center gap-2 text-sm text-emerald-400">
+              <Mic className="w-3.5 h-3.5" />
+              <span className="font-['IBM_Plex_Sans']">Connected to <strong>{voiceState.channelName}</strong></span>
+            </div>
+            <button
+              onClick={() => {
+                const websocket = ws?.current;
+                if (websocket?.readyState === WebSocket.OPEN) {
+                  websocket.send(JSON.stringify({ type: 'leave_voice', channel_id: voiceState.channelId }));
+                }
+                handleVoiceLeave();
+              }}
+              className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors"
+              data-testid="voice-disconnect-btn"
+            >
+              <PhoneOff className="w-3.5 h-3.5" />
+              Disconnect
+            </button>
+          </div>
+        )}
+
         {showSettings ? (
           <UserSettings onClose={() => setShowSettings(null)} />
         ) : showServerSettings && serverData ? (
           <ServerSettings server={serverData} onClose={() => setShowServerSettings(false)} onUpdate={() => loadServerData(activeServer)} />
+        ) : channelSettings && serverData ? (
+          <ChannelSettings channel={channelSettings} server={serverData} onClose={() => setChannelSettings(null)} onUpdate={() => loadServerData(activeServer)} />
         ) : showDrive && serverData ? (
           <ShareDrive server={serverData} />
         ) : activeView === 'friends' && !activeServer ? (
-          <FriendsList onStartDM={(conv) => { setActiveConversation(conv); setActiveView('dms'); }} />
-        ) : activeServer && activeChannel && activeChannel.channel_type === 'voice' ? (
+          <FriendsList onStartDM={handleStartDM} />
+        ) : showVoiceView ? (
           <div className="flex-1 flex min-h-0">
             <VoiceChannel
               channel={activeChannel}
               server={serverData}
               user={user}
               ws={ws}
+              onVoiceJoin={() => handleVoiceJoin(activeServer, activeChannel)}
+              onVoiceLeave={handleVoiceLeave}
             />
             {showMembers && serverData && <MembersPanel server={serverData} />}
           </div>
@@ -228,7 +288,6 @@ export default function MainApp() {
         )}
       </div>
 
-      {/* User bar at bottom of server sidebar - shown via CSS */}
       {mobileMenuOpen && <div className="fixed inset-0 bg-black/50 z-30 lg:hidden" onClick={() => setMobileMenuOpen(false)} />}
     </div>
   );

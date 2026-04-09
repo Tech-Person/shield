@@ -157,10 +157,16 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
         const data = JSON.parse(event.data);
         if (data.type === 'new_message' && data.message.conversation_id === conversation?.id) {
           const msg = await decryptE2EMessage(data.message);
-          setMessages(prev => [...prev, { ...msg, reactions: [], thread_count: 0 }]);
+          setMessages(prev => {
+            if (prev.some(m => m.id === msg.id)) return prev;
+            return [...prev, { ...msg, reactions: [], thread_count: 0 }];
+          });
         } else if (data.type === 'channel_message' && data.message.channel_id === channel?.id) {
           const msg = await decryptE2EMessage(data.message);
-          setMessages(prev => [...prev, { ...msg, reactions: [], thread_count: 0 }]);
+          setMessages(prev => {
+            if (prev.some(m => m.id === msg.id)) return prev;
+            return [...prev, { ...msg, reactions: [], thread_count: 0 }];
+          });
         } else if (data.type === 'reaction_update') {
           setMessages(prev => prev.map(m => m.id === data.message_id ? { ...m, reactions: data.reactions } : m));
         } else if (data.type === 'message_edited') {
@@ -331,9 +337,11 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
       const formData = new FormData();
       formData.append('file', file);
       const { data: fileData } = await api.post('/upload?context=message', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-      const attachmentText = `[File: ${fileData.original_filename}]`;
       const endpoint = isChannel ? `/channels/${channel.id}/messages` : `/dm/${conversation.id}/messages`;
-      const { data } = await api.post(endpoint, { content: attachmentText, attachments: [fileData.id] });
+      const payload = { content: '', attachments: [fileData.id] };
+      // Store original filename in a hidden content tag for the renderer
+      payload.content = `[file:${fileData.original_filename}:${fileData.id}]`;
+      const { data } = await api.post(endpoint, payload);
       setMessages(prev => [...prev, { ...data, reactions: [], thread_count: 0 }]);
     } catch {}
     setUploading(false);
@@ -473,7 +481,37 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
                           <button onClick={() => setEditingId(null)} className="text-slate-500 hover:text-slate-300 text-xs">Cancel</button>
                         </div>
                       ) : (
-                        <MessageContent content={msg.content} />
+                        <>
+                          {msg.content && !msg.content.match(/^\[file:/) && !msg.content.match(/^\[File:/) && <MessageContent content={msg.content} />}
+                          {msg.attachments?.length > 0 && (
+                            <div className="mt-1 space-y-1">
+                              {msg.attachments.map((att, ai) => {
+                                const fileId = typeof att === 'string' ? att : att.id;
+                                // Try to extract filename from content tag [file:name:id] or [File: name]
+                                const tagMatch = msg.content?.match(/\[file:(.+?):/) || msg.content?.match(/\[File:\s*(.+?)\]/);
+                                const fileName = tagMatch?.[1] || 'Download file';
+                                const backendUrl = process.env.REACT_APP_BACKEND_URL || window.location.origin;
+                                const downloadUrl = `${backendUrl}/api/files/${fileId}/download`;
+                                const isImage = fileName.match(/\.(png|jpg|jpeg|gif|webp|svg)$/i);
+                                return (
+                                  <div key={ai}>
+                                    {isImage ? (
+                                      <div className="mt-1 max-w-sm">
+                                        <img src={downloadUrl} alt={fileName} className="rounded-lg max-h-64 w-auto" loading="lazy" />
+                                        <a href={downloadUrl} target="_blank" rel="noreferrer" className="text-xs text-emerald-400 hover:underline mt-0.5 block" data-testid={`attachment-download-${fileId}`}>{fileName}</a>
+                                      </div>
+                                    ) : (
+                                      <a href={downloadUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-3 py-2 bg-slate-800/50 border border-white/5 rounded-lg text-sm text-emerald-400 hover:text-emerald-300 hover:bg-slate-800 transition-colors" data-testid={`attachment-download-${fileId}`}>
+                                        <Paperclip className="w-3.5 h-3.5" />
+                                        <span className="font-['IBM_Plex_Sans']">{fileName}</span>
+                                      </a>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </>
                       )}
 
                       {/* Reactions display */}
