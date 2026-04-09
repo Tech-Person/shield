@@ -5,26 +5,14 @@
 ### Vision
 A self-hosted, privacy-focused Discord replacement with end-to-end encryption, real-time messaging, voice/video, and full administrative control.
 
-### Core Requirements
-- E2E encrypted messages (server cannot read content)
-- Servers with roles, text/voice channels, permissions
-- DMs and group DMs with friends list
-- Voice/Video streaming (WebRTC mesh, P2P, up to 10 viewers)
-- Share Drive per server (25GB limit), user media 5GB
-- Web UI + PWA, Debian deployment package
-- Message reactions, threads, GIFs, typing indicators, read receipts
-- Admin GUI with passkey auth, user statuses
-- Self-destructing status messages
-- UI-driven self-updates from GitHub
-
 ### Architecture
-- Frontend: React (Shadcn UI), deployed on port 3000
-- Backend: FastAPI, deployed on port 8001
+- Frontend: React (Shadcn UI), port 3000
+- Backend: FastAPI, port 8001
 - Database: MongoDB
-- Real-time: WebSockets
+- Real-time: WebSockets (multi-connection per user)
 - Auth: JWT + WebAuthn Passkeys + 2FA
-- Encryption: RSA-OAEP 2048 (key exchange) + AES-256-GCM (message encryption)
-- Voice/Video: WebRTC mesh with optional TURN relay (coturn via Docker)
+- Encryption: RSA-OAEP 2048 + AES-256-GCM
+- Voice/Video: WebRTC mesh + coturn TURN relay
 
 ### What's Implemented
 
@@ -34,40 +22,39 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
 - [x] Server management (create, roles, channels, permissions - 47 flags)
 - [x] Share Drive (file upload, text file creation, storage requests)
 - [x] Custom emojis and stickers
-- [x] Message reactions, threads, GIFs
-- [x] Typing indicators and read receipts
+- [x] Message reactions, threads, GIFs, typing indicators, read receipts
 - [x] Member role assignment UI
 - [x] Debian deployment package (install.sh, uninstall.sh)
 - [x] UI-driven self-update from GitHub
 - [x] Dynamic frontend API URL for self-hosting
-- [x] End-to-End Encryption (E2E) - RSA-OAEP/AES-GCM, multi-device, key backup/restore
-- [x] TURN Server Management - Admin controls for coturn Docker container
-- [x] WebRTC P2P Voice/Video - TURN credential integration, connection state monitoring, 10-participant cap
+- [x] End-to-End Encryption (E2E) - multi-device, key backup/restore
+- [x] TURN Server Management - Admin coturn Docker controls
+- [x] WebRTC P2P Voice/Video - TURN credentials, 10-participant cap
+- [x] DM Voice/Video Calls - Ringing/answer/decline/end, WebRTC signaling
+- [x] Group DM creation
+- [x] Channel settings per channel (name, topic, slowmode, delete)
+- [x] Copy invite link with feedback
+- [x] Voice join/leave sounds, speaking indicator
 
-#### Bug Fixes (2026-04-09)
-- [x] Fixed double message receives in DMs (removed redundant broadcast_dm)
-- [x] Fixed messages requiring page reload (dedup in WS handler)
-- [x] Fixed file uploads showing [File:Filename] text (proper attachment rendering with download links/image previews)
-- [x] Fixed status message save (added Save Status button)
-- [x] Fixed server settings not closing on channel click
-- [x] Fixed display name not syncing to server members
-- [x] Fixed status updates not broadcasting to server members (real-time via channels)
-- [x] Fixed new DM not appearing in list (loadConversations called after DM create)
-- [x] Added voice channel join/leave sounds (Web Audio API synthesis)
-- [x] Added speaking indicator (green glow on avatar when talking)
-- [x] Added interactive copy invite link (Popover dropdown with toast)
-- [x] Added channel settings gear per channel (visible to managers only)
-- [x] Added group DM creation dialog
-- [x] Added voice persistence across navigation (voice bar when browsing other views)
-- [x] Improved members panel (online/offline sections, status colors, tooltips)
-- [x] Added server invites GET endpoint
+#### Bug Fixes (2026-04-09, Batch 1)
+- [x] Fixed double message receives in DMs
+- [x] Fixed file uploads showing [File:Filename] text
+- [x] Fixed status message save, server settings not closing
+- [x] Fixed display name sync, new DM not appearing
+- [x] Added persistent voice across navigation
+
+#### Bug Fixes (2026-04-09, Batch 2)
+- [x] **Fixed WebSocket manager** - Now supports multiple connections per user (multi-tab), send_personal only removes dead individual connections instead of nuking the entire user
+- [x] **Fixed status makes all users offline** - Status broadcasts directly to server members (not per-channel spam), MainApp updates member status locally without full refetch
+- [x] **Fixed messages not updating live** - Removed duplicate broadcast_dm, fixed orphaned decorator on DM messages endpoint
+- [x] **Fixed voice not updating live** - VoiceChannel now subscribes to channel on mount; join_voice auto-subscribes in backend
+- [x] **Fixed voice showing users alone** - Same subscription fix enables voice_state_update to reach all participants
 
 #### P2 Features (Pending)
 - [ ] Self-destructing status messages
-- [ ] DM voice/video calls
 
 #### P3 Features (Pending)
 - [ ] Native app skeletons (Linux, Windows, iOS, Android)
 
 ### Refactoring Notes
-- `server.py` is 2870+ lines. Should be split into modular routers (auth.py, messaging.py, admin.py, voice.py, keys.py)
+- `server.py` is 2970+ lines — split into modular routers recommended
