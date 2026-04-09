@@ -114,22 +114,61 @@ if ! command -v yarn &>/dev/null; then
 fi
 
 # ── Step 3: MongoDB 7.0 ──
-if ! command -v mongod &>/dev/null && ! command -v mongosh &>/dev/null; then
+if ! command -v mongod &>/dev/null; then
     log "Step 3/9 — Installing MongoDB 7.0..."
-    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg 2>/dev/null
 
-    # Always use 'jammy' — MongoDB only publishes repos for specific Ubuntu LTS
-    # This works on Debian 11/12/13 and Ubuntu 22.04/24.04
-    echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" > /etc/apt/sources.list.d/mongodb-org-7.0.list
+    # Clean up any broken state from previous attempts
+    rm -f /usr/share/keyrings/mongodb-server-7.0.gpg 2>/dev/null
+    rm -f /etc/apt/sources.list.d/mongodb-org-7.0.list 2>/dev/null
 
-    apt-get update -qq 2>/dev/null || true
-    apt-get install -y -qq mongodb-org > /dev/null 2>&1 || {
-        # Fallback: try installing from default repos
-        warn "MongoDB 7.0 repo install failed. Trying system default mongodb..."
-        apt-get install -y -qq mongodb > /dev/null 2>&1 || err "Could not install MongoDB. Install it manually, then re-run this script."
-    }
-    systemctl enable mongod 2>/dev/null || systemctl enable mongodb 2>/dev/null || true
-    systemctl start mongod 2>/dev/null || systemctl start mongodb 2>/dev/null || true
+    # Import GPG key (--batch avoids overwrite prompts)
+    curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
+        gpg --batch --yes --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+
+    # Detect OS and pick the right repo
+    source /etc/os-release 2>/dev/null || true
+    MONGO_INSTALLED=false
+
+    if [[ "${ID:-}" == "debian" ]]; then
+        # For Debian: use bookworm repo (works on bookworm + trixie)
+        log "  Detected Debian — using bookworm repo..."
+        echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/debian bookworm/mongodb-org/7.0 main" \
+            > /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+        apt-get update -qq 2>/dev/null || true
+        if apt-get install -y -qq mongodb-org > /dev/null 2>&1; then
+            MONGO_INSTALLED=true
+        fi
+    fi
+
+    if [[ "${MONGO_INSTALLED}" != "true" ]]; then
+        # Fallback: try Ubuntu jammy repo (works on Ubuntu and some Debian)
+        log "  Trying Ubuntu jammy repo as fallback..."
+        echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" \
+            > /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+        apt-get update -qq 2>/dev/null || true
+        if apt-get install -y -qq mongodb-org > /dev/null 2>&1; then
+            MONGO_INSTALLED=true
+        fi
+    fi
+
+    if [[ "${MONGO_INSTALLED}" != "true" ]]; then
+        rm -f /etc/apt/sources.list.d/mongodb-org-7.0.list
+        apt-get update -qq 2>/dev/null || true
+        echo ""
+        echo -e "${RED}MongoDB could not be installed automatically.${NC}"
+        echo -e "Please install MongoDB manually:"
+        echo -e "  ${CYAN}https://www.mongodb.com/docs/manual/administration/install-on-linux/${NC}"
+        echo ""
+        echo -e "After installing, start it and re-run this script:"
+        echo -e "  sudo systemctl enable mongod && sudo systemctl start mongod"
+        echo -e "  sudo bash deploy/install.sh"
+        exit 1
+    fi
+
+    systemctl enable mongod 2>/dev/null || true
+    systemctl start mongod 2>/dev/null || true
     sleep 3
 else
     log "Step 3/9 — MongoDB already installed, ensuring it's running..."
