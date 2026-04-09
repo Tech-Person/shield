@@ -4,17 +4,15 @@
 # Installs and configures the full stack as systemd services.
 #
 # DIRECTORY STRUCTURE REQUIRED:
-#   ~/shield/            (or wherever you place it)
-#   ├── backend/         (entire backend folder)
-#   ├── frontend/        (entire frontend folder)
-#   └── deploy/          (this script lives here)
-#       ├── install.sh
-#       ├── uninstall.sh
-#       └── README.md
+#   shield/
+#   ├── backend/
+#   ├── frontend/
+#   └── deploy/
+#       └── install.sh  (this file)
 #
 # Run as root:  sudo bash deploy/install.sh
 # ──────────────────────────────────────────────────────────────
-set -euo pipefail
+set -uo pipefail
 
 # ── Colour helpers ──
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -28,44 +26,81 @@ err()  { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# Verify required directories exist
-[[ ! -d "${PROJECT_ROOT}/backend" ]] && err "Missing backend/ directory. Expected at: ${PROJECT_ROOT}/backend\nSee deploy/README.md for the required directory structure."
-[[ ! -d "${PROJECT_ROOT}/frontend" ]] && err "Missing frontend/ directory. Expected at: ${PROJECT_ROOT}/frontend\nSee deploy/README.md for the required directory structure."
-[[ ! -f "${PROJECT_ROOT}/backend/server.py" ]] && err "backend/server.py not found. Is this the correct project directory?"
-[[ ! -f "${PROJECT_ROOT}/frontend/package.json" ]] && err "frontend/package.json not found. Is this the correct project directory?"
+[[ ! -d "${PROJECT_ROOT}/backend" ]] && err "Missing backend/ directory at: ${PROJECT_ROOT}/backend"
+[[ ! -d "${PROJECT_ROOT}/frontend" ]] && err "Missing frontend/ directory at: ${PROJECT_ROOT}/frontend"
+[[ ! -f "${PROJECT_ROOT}/backend/server.py" ]] && err "backend/server.py not found."
+[[ ! -f "${PROJECT_ROOT}/frontend/package.json" ]] && err "frontend/package.json not found."
 
 log "Source directory: ${PROJECT_ROOT}"
 
-# ── Configuration (override via environment) ──
-INSTALL_DIR="${SHIELD_DIR:-/opt/shield}"
-DOMAIN="${SHIELD_DOMAIN:-localhost}"
-BACKEND_PORT="${SHIELD_BACKEND_PORT:-8001}"
-ADMIN_EMAIL="${SHIELD_ADMIN_EMAIL:-admin@shield.local}"
-ADMIN_PASSWORD="${SHIELD_ADMIN_PASSWORD:-$(openssl rand -base64 16)}"
-JWT_SECRET="${SHIELD_JWT_SECRET:-$(openssl rand -hex 32)}"
-MONGO_DB_NAME="${SHIELD_DB_NAME:-shield}"
+# ──────────────────────────────────────────────────────────────
+# INTERACTIVE SETUP
+# ──────────────────────────────────────────────────────────────
+echo ""
+echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}  Shield — Installation Setup${NC}"
+echo -e "${CYAN}═══════════════════════════════════════════════════════════════${NC}"
+echo ""
+
+# Domain
+read -rp "$(echo -e "${CYAN}Domain name${NC} (e.g. chat.example.com, or 'localhost' for local): ")" INPUT_DOMAIN
+DOMAIN="${INPUT_DOMAIN:-localhost}"
+
+# Admin email
+DEFAULT_ADMIN_EMAIL="admin@shield.local"
+read -rp "$(echo -e "${CYAN}Admin email${NC} [${DEFAULT_ADMIN_EMAIL}]: ")" INPUT_ADMIN_EMAIL
+ADMIN_EMAIL="${INPUT_ADMIN_EMAIL:-$DEFAULT_ADMIN_EMAIL}"
+
+# Admin password
+while true; do
+    read -rsp "$(echo -e "${CYAN}Admin password${NC} (min 8 chars): ")" INPUT_ADMIN_PASSWORD
+    echo ""
+    if [[ ${#INPUT_ADMIN_PASSWORD} -ge 8 ]]; then
+        ADMIN_PASSWORD="${INPUT_ADMIN_PASSWORD}"
+        break
+    elif [[ -z "${INPUT_ADMIN_PASSWORD}" ]]; then
+        ADMIN_PASSWORD="$(openssl rand -base64 16)"
+        echo -e "  ${YELLOW}Generated password:${NC} ${ADMIN_PASSWORD}"
+        break
+    else
+        echo -e "  ${RED}Password must be at least 8 characters. Try again.${NC}"
+    fi
+done
+
+# Install directory
+read -rp "$(echo -e "${CYAN}Install directory${NC} [/opt/shield]: ")" INPUT_DIR
+INSTALL_DIR="${INPUT_DIR:-/opt/shield}"
+
+echo ""
+echo -e "${GREEN}Configuration:${NC}"
+echo -e "  Domain:     ${DOMAIN}"
+echo -e "  Admin:      ${ADMIN_EMAIL}"
+echo -e "  Install to: ${INSTALL_DIR}"
+echo ""
+read -rp "Proceed with installation? [Y/n]: " CONFIRM
+[[ "${CONFIRM,,}" == "n" ]] && echo "Aborted." && exit 0
+
+# ── Internal config ──
+BACKEND_PORT="8001"
+JWT_SECRET="$(openssl rand -hex 32)"
+MONGO_DB_NAME="shield"
 
 log "Installing Shield to ${INSTALL_DIR}"
-log "Domain: ${DOMAIN}"
 
 # ── Step 1: System packages ──
 log "Step 1/9 — Installing system dependencies..."
-apt-get update -qq
+apt-get update -qq 2>/dev/null || warn "apt-get update had warnings (non-fatal)"
 
-# Install core packages (software-properties-common is optional, skip if unavailable)
 apt-get install -y -qq \
-    curl wget gnupg2 lsb-release \
+    curl wget gnupg2 \
     build-essential python3 python3-pip python3-venv \
     nginx certbot python3-certbot-nginx \
-    git jq unzip > /dev/null 2>&1 || {
-    warn "Some optional packages missing, trying minimal set..."
-    apt-get install -y -qq \
-        curl wget gnupg2 \
-        python3 python3-pip python3-venv \
-        nginx git jq > /dev/null
+    git jq unzip 2>/dev/null || {
+    warn "Some packages unavailable, trying minimal set..."
+    apt-get install -y -qq curl wget gnupg2 python3 python3-pip python3-venv nginx git jq 2>/dev/null || err "Failed to install base packages."
 }
 
-# ── Step 2: Node.js 20.x via NodeSource ──
+# ── Step 2: Node.js 20.x ──
 if ! command -v node &>/dev/null || [[ "$(node -v | cut -d. -f1 | tr -d v)" -lt 18 ]]; then
     log "Step 2/9 — Installing Node.js 20.x..."
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null 2>&1
@@ -74,7 +109,6 @@ else
     log "Step 2/9 — Node.js $(node -v) already installed, skipping."
 fi
 
-# Install yarn globally
 if ! command -v yarn &>/dev/null; then
     npm install -g yarn > /dev/null 2>&1
 fi
@@ -84,42 +118,45 @@ if ! command -v mongod &>/dev/null && ! command -v mongosh &>/dev/null; then
     log "Step 3/9 — Installing MongoDB 7.0..."
     curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg 2>/dev/null
 
-    # Detect codename; fall back to jammy for unknown distros
-    CODENAME="$(lsb_release -cs 2>/dev/null || echo jammy)"
-    echo "deb [signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/ubuntu ${CODENAME}/mongodb-org/7.0 multiverse" > /etc/apt/sources.list.d/mongodb-org-7.0.list
-    apt-get update -qq
+    # Always use 'jammy' — MongoDB only publishes repos for specific Ubuntu LTS
+    # This works on Debian 11/12/13 and Ubuntu 22.04/24.04
+    echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" > /etc/apt/sources.list.d/mongodb-org-7.0.list
+
+    apt-get update -qq 2>/dev/null || true
     apt-get install -y -qq mongodb-org > /dev/null 2>&1 || {
-        warn "MongoDB repo failed for '${CODENAME}'. Trying 'jammy'..."
-        echo "deb [signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" > /etc/apt/sources.list.d/mongodb-org-7.0.list
-        apt-get update -qq
-        apt-get install -y -qq mongodb-org > /dev/null
+        # Fallback: try installing from default repos
+        warn "MongoDB 7.0 repo install failed. Trying system default mongodb..."
+        apt-get install -y -qq mongodb > /dev/null 2>&1 || err "Could not install MongoDB. Install it manually, then re-run this script."
     }
-    systemctl enable mongod
-    systemctl start mongod
-    sleep 2
+    systemctl enable mongod 2>/dev/null || systemctl enable mongodb 2>/dev/null || true
+    systemctl start mongod 2>/dev/null || systemctl start mongodb 2>/dev/null || true
+    sleep 3
 else
     log "Step 3/9 — MongoDB already installed, ensuring it's running..."
     systemctl enable mongod 2>/dev/null || true
     systemctl start mongod 2>/dev/null || true
 fi
 
-# Verify MongoDB is up
-for i in 1 2 3; do
+# Verify MongoDB
+for i in 1 2 3 4 5; do
     if mongosh --quiet --eval "db.runCommand({ping:1})" > /dev/null 2>&1; then
         break
     fi
-    warn "MongoDB not ready, retrying in 3s... (attempt $i/3)"
+    if mongosh --quiet --eval "db.runCommand({ping:1})" > /dev/null 2>&1; then
+        break
+    fi
+    warn "MongoDB not ready (attempt $i/5)..."
     sleep 3
 done
-mongosh --quiet --eval "db.runCommand({ping:1})" > /dev/null 2>&1 || err "MongoDB is not responding. Check: systemctl status mongod"
+mongosh --quiet --eval "db.runCommand({ping:1})" > /dev/null 2>&1 || err "MongoDB is not responding.\n  Check: systemctl status mongod\n  Logs:  journalctl -u mongod"
 log "MongoDB is running."
 
 # ── Step 4: Copy application files ──
 log "Step 4/9 — Copying application to ${INSTALL_DIR}..."
 mkdir -p "${INSTALL_DIR}"
-cp -r "${PROJECT_ROOT}/backend" "${INSTALL_DIR}/backend"
-cp -r "${PROJECT_ROOT}/frontend" "${INSTALL_DIR}/frontend"
-cp -r "${PROJECT_ROOT}/deploy" "${INSTALL_DIR}/deploy"
+rsync -a --exclude='node_modules' --exclude='build' --exclude='venv' --exclude='__pycache__' --exclude='.git' "${PROJECT_ROOT}/backend/" "${INSTALL_DIR}/backend/" 2>/dev/null || cp -r "${PROJECT_ROOT}/backend" "${INSTALL_DIR}/backend"
+rsync -a --exclude='node_modules' --exclude='build' --exclude='.git' "${PROJECT_ROOT}/frontend/" "${INSTALL_DIR}/frontend/" 2>/dev/null || cp -r "${PROJECT_ROOT}/frontend" "${INSTALL_DIR}/frontend"
+cp -r "${PROJECT_ROOT}/deploy" "${INSTALL_DIR}/deploy" 2>/dev/null || true
 
 # ── Step 5: Backend setup ──
 log "Step 5/9 — Setting up Python backend..."
@@ -135,10 +172,9 @@ else
     pip install --quiet fastapi uvicorn motor pymongo python-jose[cryptography] passlib[bcrypt] python-multipart pydantic cryptography httpx websockets aiofiles
 fi
 
-# Generate encryption key
 ENCRYPTION_KEY=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')
+deactivate
 
-# Write backend .env
 cat > "${INSTALL_DIR}/backend/.env" <<ENVEOF
 MONGO_URL=mongodb://localhost:27017
 DB_NAME=${MONGO_DB_NAME}
@@ -149,14 +185,12 @@ ADMIN_PASSWORD=${ADMIN_PASSWORD}
 FRONTEND_URL=http://${DOMAIN}
 ENVEOF
 
-deactivate
 log "Backend configured."
 
 # ── Step 6: Frontend setup ──
-log "Step 6/9 — Building React frontend..."
+log "Step 6/9 — Building React frontend (this may take a few minutes)..."
 cd "${INSTALL_DIR}/frontend"
 
-# Determine the backend URL the browser will use
 if [[ "${DOMAIN}" == "localhost" ]]; then
     BROWSER_API_URL="http://localhost"
 else
@@ -167,14 +201,11 @@ cat > "${INSTALL_DIR}/frontend/.env" <<ENVEOF
 REACT_APP_BACKEND_URL=${BROWSER_API_URL}
 ENVEOF
 
-# Remove node_modules if transferred (saves space, will reinstall)
-rm -rf node_modules/.cache 2>/dev/null || true
-
 yarn install --frozen-lockfile --silent 2>/dev/null || yarn install --silent
-yarn build
+yarn build || err "Frontend build failed. Check Node.js version (need 18+): node -v"
 log "Frontend built."
 
-# ── Step 7: Create systemd service ──
+# ── Step 7: Systemd service ──
 log "Step 7/9 — Creating systemd service..."
 
 cat > /etc/systemd/system/shield-backend.service <<SVCEOF
@@ -203,19 +234,17 @@ systemctl enable shield-backend
 systemctl start shield-backend
 log "Backend service started."
 
-# ── Step 8: Configure nginx ──
-log "Step 8/9 — Configuring nginx reverse proxy..."
+# ── Step 8: nginx ──
+log "Step 8/9 — Configuring nginx..."
 
 cat > /etc/nginx/sites-available/shield <<NGXEOF
 server {
     listen 80;
     server_name ${DOMAIN};
 
-    # Frontend — serve static build
     root ${INSTALL_DIR}/frontend/build;
     index index.html;
 
-    # API & WebSocket reverse proxy
     location /api/ {
         proxy_pass http://127.0.0.1:${BACKEND_PORT}/api/;
         proxy_set_header Host \$host;
@@ -236,7 +265,6 @@ server {
         proxy_read_timeout 86400s;
     }
 
-    # SPA fallback
     location / {
         try_files \$uri \$uri/ /index.html;
     }
@@ -252,20 +280,20 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t 2>/dev/null || err "nginx config test failed"
 systemctl enable nginx
 systemctl restart nginx
-log "nginx configured and running."
+log "nginx running."
 
-# ── Step 9: Optional TLS with Let's Encrypt ──
+# ── Step 9: TLS ──
 if [[ "${DOMAIN}" != "localhost" && "${DOMAIN}" != "127.0.0.1" ]]; then
-    log "Step 9/9 — TLS setup..."
     echo ""
-    read -rp "Set up HTTPS with Let's Encrypt for ${DOMAIN}? [y/N]: " SETUP_TLS
+    read -rp "$(echo -e "${CYAN}Set up HTTPS with Let's Encrypt for ${DOMAIN}?${NC} [y/N]: ")" SETUP_TLS
     if [[ "${SETUP_TLS,,}" == "y" ]]; then
-        certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos --email "${ADMIN_EMAIL}" || warn "Certbot failed. Run manually later: certbot --nginx -d ${DOMAIN}"
+        log "Step 9/9 — Setting up TLS..."
+        certbot --nginx -d "${DOMAIN}" --non-interactive --agree-tos --email "${ADMIN_EMAIL}" || warn "Certbot failed. Run manually: sudo certbot --nginx -d ${DOMAIN}"
     else
-        log "Skipping TLS. Set up later: sudo certbot --nginx -d ${DOMAIN}"
+        log "Step 9/9 — Skipping TLS. Run later: sudo certbot --nginx -d ${DOMAIN}"
     fi
 else
-    log "Step 9/9 — Skipping TLS (localhost deployment)."
+    log "Step 9/9 — Skipping TLS (localhost)."
 fi
 
 # ── Done ──
@@ -279,12 +307,12 @@ echo -e "  ${CYAN}Admin email:${NC}    ${ADMIN_EMAIL}"
 echo -e "  ${CYAN}Admin password:${NC} ${ADMIN_PASSWORD}"
 echo -e "  ${CYAN}Install dir:${NC}    ${INSTALL_DIR}"
 echo ""
-echo -e "  ${YELLOW}Services:${NC}"
+echo -e "  ${YELLOW}Manage services:${NC}"
 echo -e "    sudo systemctl status shield-backend"
 echo -e "    sudo systemctl status nginx"
 echo -e "    sudo systemctl status mongod"
 echo ""
-echo -e "  ${YELLOW}Logs:${NC}"
+echo -e "  ${YELLOW}View logs:${NC}"
 echo -e "    sudo journalctl -u shield-backend -f"
 echo ""
 echo -e "  ${YELLOW}Uninstall:${NC}"
