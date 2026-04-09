@@ -19,6 +19,8 @@ import pyotp
 import qrcode
 import io
 import base64
+import subprocess
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
@@ -1877,6 +1879,333 @@ async def admin_list_servers(request: Request):
         drive_s = await db.drive_files.aggregate(drive_pipe).to_list(1)
         s["drive_storage_used"] = drive_s[0]["total"] if drive_s else 0
     return servers
+
+# ─── UPDATE SYSTEM ───
+DEFAULT_REPO_URL = "https://github.com/Tech-Person/shield"
+INSTALL_DIR = os.environ.get("SHIELD_DIR", "/opt/shield")
+update_lock = asyncio.Lock()
+
+@api_router.get("/admin/update/config")
+async def get_update_config(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    config = await db.update_config.find_one({"key": "update"}, {"_id": 0})
+    if not config:
+        config = {"key": "update", "repo_url": DEFAULT_REPO_URL, "last_check": None, "last_update": None}
+        await db.update_config.insert_one(config)
+    return {
+        "repo_url": config.get("repo_url", DEFAULT_REPO_URL),
+        "last_check": config.get("last_check"),
+        "last_update": config.get("last_update"),
+        "last_update_status": config.get("last_update_status"),
+        "current_commit": config.get("current_commit"),
+        "current_commit_message": config.get("current_commit_message"),
+    }
+
+@api_router.put("/admin/update/config")
+async def set_update_config(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    body = await request.json()
+    repo_url = body.get("repo_url", "").strip()
+    if not repo_url:
+        raise HTTPException(400, "repo_url required")
+    await db.update_config.update_one(
+        {"key": "update"},
+        {"$set": {"repo_url": repo_url}},
+        upsert=True
+    )
+    return {"message": "Config updated"}
+
+@api_router.post("/admin/update/check")
+async def check_for_updates(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    config = await db.update_config.find_one({"key": "update"}, {"_id": 0})
+    repo_url = (config or {}).get("repo_url", DEFAULT_REPO_URL)
+
+    try:
+        import httpx
+        api_url = repo_url.replace("github.com", "api.github.com/repos") + "/commits?per_page=5"
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(api_url, headers={"Accept": "application/vnd.github.v3+json"})
+            resp.raise_for_status()
+            commits = resp.json()
+
+        # Get local commit if git repo exists
+        local_commit = None
+        local_message = None
+        try:
+            result = subprocess.run(["git", "log", "-1", "--format=%H|||%s"], capture_output=True, text=True, cwd=INSTALL_DIR)
+            if result.returncode == 0 and "|||" in result.stdout.strip():
+                parts = result.stdout.strip().split("|||", 1)
+                local_commit = parts[0][:7]
+                local_message = parts[1]
+        except Exception:
+            pass
+
+        remote_commits = []
+        for c in commits[:5]:
+            remote_commits.append({
+                "sha": c["sha"][:7],
+                "message": c["commit"]["message"].split("\n")[0][:80],
+                "author": c["commit"]["author"]["name"],
+                "date": c["commit"]["author"]["date"],
+            })
+
+        remote_latest = remote_commits[0]["sha"] if remote_commits else None
+        has_updates = local_commit != remote_latest if local_commit and remote_latest else True
+
+        now = datetime.now(timezone.utc).isoformat()
+        await db.update_config.update_one(
+            {"key": "update"},
+            {"$set": {
+                "last_check": now,
+                "current_commit": local_commit,
+                "current_commit_message": local_message,
+                "remote_latest": remote_latest,
+            }},
+            upsert=True
+        )
+
+        return {
+            "has_updates": has_updates,
+            "local_commit": local_commit,
+            "local_message": local_message,
+            "remote_latest": remote_latest,
+            "remote_commits": remote_commits,
+            "checked_at": now,
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Failed to check for updates: {str(e)}")
+
+@api_router.post("/admin/update/apply")
+async def apply_update(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+
+    if update_lock.locked():
+        raise HTTPException(409, "An update is already in progress")
+
+    config = await db.update_config.find_one({"key": "update"}, {"_id": 0})
+    repo_url = (config or {}).get("repo_url", DEFAULT_REPO_URL)
+
+    # Mark update as in-progress
+    now = datetime.now(timezone.utc).isoformat()
+    await db.update_config.update_one(
+        {"key": "update"},
+        {"$set": {"last_update_status": "in_progress", "last_update": now}},
+        upsert=True
+    )
+
+    # Run update in background
+    asyncio.create_task(_run_update(repo_url))
+    return {"message": "Update started", "status": "in_progress"}
+
+@api_router.get("/admin/update/status")
+async def get_update_status(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    config = await db.update_config.find_one({"key": "update"}, {"_id": 0})
+    return {
+        "status": (config or {}).get("last_update_status", "idle"),
+        "log": (config or {}).get("update_log", ""),
+        "last_update": (config or {}).get("last_update"),
+        "current_commit": (config or {}).get("current_commit"),
+    }
+
+async def _run_update(repo_url: str):
+    async with update_lock:
+        log_lines = []
+        def log(msg):
+            log_lines.append(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {msg}")
+
+        try:
+            log("Starting update...")
+
+            # Step 1: Check if install dir is a git repo
+            is_git = os.path.isdir(os.path.join(INSTALL_DIR, ".git"))
+
+            if is_git:
+                log("Git repo found. Pulling latest changes...")
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "fetch", "--all",
+                    cwd=INSTALL_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await proc.communicate()
+                log(f"git fetch: {stdout.decode().strip() or stderr.decode().strip() or 'ok'}")
+
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "reset", "--hard", "origin/main",
+                    cwd=INSTALL_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    # Try master branch
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "reset", "--hard", "origin/master",
+                        cwd=INSTALL_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    stdout, stderr = await proc.communicate()
+                log(f"git reset: {stdout.decode().strip() or stderr.decode().strip() or 'ok'}")
+            else:
+                log("Not a git repo. Initializing from remote...")
+                # Clone to temp, then move files
+                tmp_dir = f"/tmp/shield-update-{uuid.uuid4().hex[:8]}"
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "clone", "--depth=1", repo_url, tmp_dir,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    log(f"git clone failed: {stderr.decode()}")
+                    raise Exception("git clone failed")
+                log("Clone complete. Syncing files...")
+
+                # Preserve .env files and venv
+                for item in ["backend", "frontend", "deploy"]:
+                    src = os.path.join(tmp_dir, item)
+                    dst = os.path.join(INSTALL_DIR, item)
+                    if os.path.isdir(src):
+                        # Backup .env
+                        env_backup = None
+                        env_path = os.path.join(dst, ".env")
+                        if os.path.exists(env_path):
+                            with open(env_path) as f:
+                                env_backup = f.read()
+                        # Backup venv path
+                        venv_path = os.path.join(dst, "venv")
+                        has_venv = os.path.isdir(venv_path)
+
+                        # Sync (exclude venv, node_modules, .env, build)
+                        proc = await asyncio.create_subprocess_exec(
+                            "rsync", "-a", "--delete",
+                            "--exclude=venv", "--exclude=node_modules",
+                            "--exclude=.env", "--exclude=build",
+                            f"{src}/", f"{dst}/",
+                            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                        )
+                        await proc.communicate()
+                        log(f"Synced {item}/")
+
+                        # Restore .env
+                        if env_backup:
+                            with open(env_path, "w") as f:
+                                f.write(env_backup)
+
+                # Move .git so future updates use git pull
+                proc = await asyncio.create_subprocess_exec(
+                    "rsync", "-a", f"{tmp_dir}/.git/", f"{INSTALL_DIR}/.git/",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                await proc.communicate()
+
+                # Cleanup
+                proc = await asyncio.create_subprocess_exec("rm", "-rf", tmp_dir)
+                await proc.communicate()
+                log("Git initialized for future updates.")
+
+            # Step 2: Update backend dependencies
+            log("Installing backend dependencies...")
+            venv_pip = os.path.join(INSTALL_DIR, "backend", "venv", "bin", "pip")
+            req_file = os.path.join(INSTALL_DIR, "backend", "requirements.txt")
+            if os.path.exists(venv_pip) and os.path.exists(req_file):
+                proc = await asyncio.create_subprocess_exec(
+                    venv_pip, "install", "-r", req_file,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await proc.communicate()
+                log(f"pip install: {'ok' if proc.returncode == 0 else stderr.decode()[:200]}")
+            else:
+                log("Skipping pip (no venv or requirements.txt)")
+
+            # Step 3: Rebuild frontend
+            log("Rebuilding frontend...")
+            frontend_dir = os.path.join(INSTALL_DIR, "frontend")
+            if os.path.exists(os.path.join(frontend_dir, "package.json")):
+                proc = await asyncio.create_subprocess_exec(
+                    "yarn", "install", "--frozen-lockfile",
+                    cwd=frontend_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await proc.communicate()
+                log(f"yarn install: {'ok' if proc.returncode == 0 else 'failed (trying without lockfile)'}")
+                if proc.returncode != 0:
+                    proc = await asyncio.create_subprocess_exec(
+                        "yarn", "install",
+                        cwd=frontend_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc.communicate()
+
+                proc = await asyncio.create_subprocess_exec(
+                    "yarn", "build",
+                    cwd=frontend_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await proc.communicate()
+                log(f"yarn build: {'ok' if proc.returncode == 0 else stderr.decode()[:200]}")
+            else:
+                log("Skipping frontend (no package.json)")
+
+            # Step 4: Restart backend service
+            log("Restarting backend service...")
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl", "restart", "shield-backend",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            log(f"Service restart: {'ok' if proc.returncode == 0 else stderr.decode()[:200]}")
+
+            # Step 5: Reload nginx
+            log("Reloading nginx...")
+            proc = await asyncio.create_subprocess_exec(
+                "systemctl", "reload", "nginx",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+
+            # Get current commit
+            current_commit = None
+            current_message = None
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "log", "-1", "--format=%H|||%s",
+                    cwd=INSTALL_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await proc.communicate()
+                if "|||" in stdout.decode():
+                    parts = stdout.decode().strip().split("|||", 1)
+                    current_commit = parts[0][:7]
+                    current_message = parts[1]
+            except Exception:
+                pass
+
+            log("Update complete!")
+
+            await db.update_config.update_one(
+                {"key": "update"},
+                {"$set": {
+                    "last_update_status": "success",
+                    "update_log": "\n".join(log_lines),
+                    "current_commit": current_commit,
+                    "current_commit_message": current_message,
+                }},
+                upsert=True
+            )
+        except Exception as e:
+            log(f"Update failed: {str(e)}")
+            await db.update_config.update_one(
+                {"key": "update"},
+                {"$set": {
+                    "last_update_status": "failed",
+                    "update_log": "\n".join(log_lines),
+                }},
+                upsert=True
+            )
 
 # ─── WEBSOCKET ───
 @app.websocket("/ws/{token}")

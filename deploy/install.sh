@@ -191,11 +191,60 @@ mongosh --quiet --eval "db.runCommand({ping:1})" > /dev/null 2>&1 || err "MongoD
 log "MongoDB is running."
 
 # ── Step 4: Copy application files ──
-log "Step 4/9 — Copying application to ${INSTALL_DIR}..."
-mkdir -p "${INSTALL_DIR}"
-rsync -a --exclude='node_modules' --exclude='build' --exclude='venv' --exclude='__pycache__' --exclude='.git' "${PROJECT_ROOT}/backend/" "${INSTALL_DIR}/backend/" 2>/dev/null || cp -r "${PROJECT_ROOT}/backend" "${INSTALL_DIR}/backend"
-rsync -a --exclude='node_modules' --exclude='build' --exclude='.git' "${PROJECT_ROOT}/frontend/" "${INSTALL_DIR}/frontend/" 2>/dev/null || cp -r "${PROJECT_ROOT}/frontend" "${INSTALL_DIR}/frontend"
-cp -r "${PROJECT_ROOT}/deploy" "${INSTALL_DIR}/deploy" 2>/dev/null || true
+log "Step 4/9 — Setting up application at ${INSTALL_DIR}..."
+
+# Ensure git is available (should be from Step 1)
+if ! command -v git &>/dev/null; then
+    apt-get install -y -qq git > /dev/null 2>&1 || warn "Could not install git"
+fi
+
+if [[ -d "${INSTALL_DIR}/.git" ]]; then
+    log "  Existing git repo found. Pulling latest..."
+    cd "${INSTALL_DIR}"
+    git fetch --all 2>/dev/null
+    git reset --hard origin/main 2>/dev/null || git reset --hard origin/master 2>/dev/null || true
+elif command -v git &>/dev/null; then
+    # Try to clone the repo directly
+    config_url=""
+    read -rp "$(echo -e "${CYAN}GitHub repo URL${NC} [https://github.com/Tech-Person/shield]: ")" config_url
+    config_url="${config_url:-https://github.com/Tech-Person/shield}"
+
+    if git ls-remote "${config_url}" HEAD > /dev/null 2>&1; then
+        log "  Cloning from ${config_url}..."
+        rm -rf "${INSTALL_DIR}.tmp"
+        git clone "${config_url}" "${INSTALL_DIR}.tmp" 2>/dev/null
+
+        # If install dir already has files, preserve .env and venv
+        if [[ -d "${INSTALL_DIR}/backend" ]]; then
+            [[ -f "${INSTALL_DIR}/backend/.env" ]] && cp "${INSTALL_DIR}/backend/.env" /tmp/shield-backend-env-backup
+            [[ -f "${INSTALL_DIR}/frontend/.env" ]] && cp "${INSTALL_DIR}/frontend/.env" /tmp/shield-frontend-env-backup
+        fi
+
+        # Move cloned repo into place
+        rm -rf "${INSTALL_DIR}/backend" "${INSTALL_DIR}/frontend" "${INSTALL_DIR}/deploy"
+        mv "${INSTALL_DIR}.tmp/backend" "${INSTALL_DIR}/backend"
+        mv "${INSTALL_DIR}.tmp/frontend" "${INSTALL_DIR}/frontend"
+        [[ -d "${INSTALL_DIR}.tmp/deploy" ]] && mv "${INSTALL_DIR}.tmp/deploy" "${INSTALL_DIR}/deploy"
+        mv "${INSTALL_DIR}.tmp/.git" "${INSTALL_DIR}/.git"
+        rm -rf "${INSTALL_DIR}.tmp"
+
+        # Restore .env backups
+        [[ -f /tmp/shield-backend-env-backup ]] && mv /tmp/shield-backend-env-backup "${INSTALL_DIR}/backend/.env"
+        [[ -f /tmp/shield-frontend-env-backup ]] && mv /tmp/shield-frontend-env-backup "${INSTALL_DIR}/frontend/.env"
+    else
+        log "  Repo not accessible. Copying local files..."
+        mkdir -p "${INSTALL_DIR}"
+        rsync -a --exclude='node_modules' --exclude='build' --exclude='venv' --exclude='__pycache__' --exclude='.git' "${PROJECT_ROOT}/backend/" "${INSTALL_DIR}/backend/" 2>/dev/null || cp -r "${PROJECT_ROOT}/backend" "${INSTALL_DIR}/backend"
+        rsync -a --exclude='node_modules' --exclude='build' --exclude='.git' "${PROJECT_ROOT}/frontend/" "${INSTALL_DIR}/frontend/" 2>/dev/null || cp -r "${PROJECT_ROOT}/frontend" "${INSTALL_DIR}/frontend"
+        cp -r "${PROJECT_ROOT}/deploy" "${INSTALL_DIR}/deploy" 2>/dev/null || true
+    fi
+else
+    log "  Git not available. Copying local files..."
+    mkdir -p "${INSTALL_DIR}"
+    rsync -a --exclude='node_modules' --exclude='build' --exclude='venv' --exclude='__pycache__' --exclude='.git' "${PROJECT_ROOT}/backend/" "${INSTALL_DIR}/backend/" 2>/dev/null || cp -r "${PROJECT_ROOT}/backend" "${INSTALL_DIR}/backend"
+    rsync -a --exclude='node_modules' --exclude='build' --exclude='.git' "${PROJECT_ROOT}/frontend/" "${INSTALL_DIR}/frontend/" 2>/dev/null || cp -r "${PROJECT_ROOT}/frontend" "${INSTALL_DIR}/frontend"
+    cp -r "${PROJECT_ROOT}/deploy" "${INSTALL_DIR}/deploy" 2>/dev/null || true
+fi
 
 # ── Step 5: Backend setup ──
 log "Step 5/9 — Setting up Python backend..."

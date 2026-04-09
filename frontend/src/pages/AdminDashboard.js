@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api';
-import { Shield, Users, MessageCircle, Server, HardDrive, Mic, ArrowLeft, RefreshCw } from 'lucide-react';
+import { Shield, Users, MessageCircle, Server, HardDrive, Mic, ArrowLeft, RefreshCw, Download, GitBranch, Check, AlertCircle, Loader2, Settings2 } from 'lucide-react';
 import { Button } from '../components/ui/button';
+import { Input } from '../components/ui/input';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 
@@ -14,6 +15,16 @@ export default function AdminDashboard() {
   const [servers, setServers] = useState([]);
   const [storageRequests, setStorageRequests] = useState([]);
   const [loading, setLoading] = useState(true);
+
+  // Update system state
+  const [updateConfig, setUpdateConfig] = useState(null);
+  const [updateCheck, setUpdateCheck] = useState(null);
+  const [updateStatus, setUpdateStatus] = useState(null);
+  const [checking, setChecking] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [editRepo, setEditRepo] = useState(false);
+  const [repoInput, setRepoInput] = useState('');
+  const pollRef = useRef(null);
 
   const loadStats = useCallback(async () => {
     try {
@@ -56,6 +67,64 @@ export default function AdminDashboard() {
     try {
       await api.post(`/admin/storage-requests/${requestId}/deny`, { note: 'Denied by admin' });
       loadStats();
+    } catch {}
+  };
+
+  // ── Update system functions ──
+  const loadUpdateConfig = useCallback(async () => {
+    try {
+      const { data } = await api.get('/admin/update/config');
+      setUpdateConfig(data);
+      setRepoInput(data.repo_url || '');
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (user?.role === 'admin') loadUpdateConfig();
+  }, [user, loadUpdateConfig]);
+
+  // Poll update status while in-progress
+  useEffect(() => {
+    if (applying) {
+      pollRef.current = setInterval(async () => {
+        try {
+          const { data } = await api.get('/admin/update/status');
+          setUpdateStatus(data);
+          if (data.status !== 'in_progress') {
+            setApplying(false);
+            clearInterval(pollRef.current);
+            loadUpdateConfig();
+          }
+        } catch {}
+      }, 3000);
+      return () => clearInterval(pollRef.current);
+    }
+  }, [applying, loadUpdateConfig]);
+
+  const handleCheckUpdates = async () => {
+    setChecking(true);
+    try {
+      const { data } = await api.post('/admin/update/check');
+      setUpdateCheck(data);
+    } catch {}
+    setChecking(false);
+  };
+
+  const handleApplyUpdate = async () => {
+    setApplying(true);
+    setUpdateStatus({ status: 'in_progress', log: '' });
+    try {
+      await api.post('/admin/update/apply');
+    } catch {
+      setApplying(false);
+    }
+  };
+
+  const handleSaveRepo = async () => {
+    try {
+      await api.put('/admin/update/config', { repo_url: repoInput.trim() });
+      setEditRepo(false);
+      loadUpdateConfig();
     } catch {}
   };
 
@@ -160,6 +229,129 @@ export default function AdminDashboard() {
             </div>
           </div>
         )}
+
+        {/* Update System */}
+        <div className="mb-8 p-6 bg-slate-900/50 border border-white/5 rounded-lg" data-testid="update-panel">
+          <div className="flex items-center gap-2 mb-5">
+            <Download className="w-4 h-4 text-emerald-500" />
+            <h3 className="text-sm font-medium text-slate-200 font-['Outfit']">System Updates</h3>
+          </div>
+
+          {/* Repo config */}
+          <div className="flex items-center gap-3 mb-4 p-3 bg-slate-800/30 rounded border border-white/5">
+            <GitBranch className="w-4 h-4 text-slate-500 flex-shrink-0" />
+            {editRepo ? (
+              <div className="flex items-center gap-2 flex-1">
+                <Input
+                  value={repoInput}
+                  onChange={e => setRepoInput(e.target.value)}
+                  className="bg-slate-900 border-white/10 text-slate-100 text-sm h-8 flex-1"
+                  placeholder="https://github.com/user/repo"
+                  data-testid="repo-url-input"
+                />
+                <Button size="sm" onClick={handleSaveRepo} className="bg-emerald-500 text-slate-950 hover:bg-emerald-400 h-8 text-xs" data-testid="save-repo-btn">Save</Button>
+                <Button size="sm" variant="ghost" onClick={() => { setEditRepo(false); setRepoInput(updateConfig?.repo_url || ''); }} className="text-slate-400 h-8 text-xs">Cancel</Button>
+              </div>
+            ) : (
+              <>
+                <span className="text-sm text-slate-300 font-mono truncate flex-1" data-testid="repo-url-display">{updateConfig?.repo_url || 'Not configured'}</span>
+                <button onClick={() => setEditRepo(true)} className="text-slate-500 hover:text-slate-300 transition-colors" data-testid="edit-repo-btn">
+                  <Settings2 className="w-3.5 h-3.5" />
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* Current version */}
+          {updateConfig?.current_commit && (
+            <div className="flex items-center gap-2 mb-4 text-xs">
+              <span className="text-slate-500">Current:</span>
+              <span className="font-mono bg-slate-800 px-2 py-0.5 rounded text-emerald-400" data-testid="current-commit">{updateConfig.current_commit}</span>
+              {updateConfig.current_commit_message && <span className="text-slate-400 truncate">{updateConfig.current_commit_message}</span>}
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex items-center gap-3 mb-4">
+            <Button
+              onClick={handleCheckUpdates}
+              disabled={checking}
+              size="sm"
+              className="bg-slate-800 text-slate-200 hover:bg-slate-700 border border-white/10 h-9"
+              data-testid="check-updates-btn"
+            >
+              {checking ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5 mr-1.5" />}
+              Check for Updates
+            </Button>
+            {updateCheck?.has_updates && !applying && (
+              <Button
+                onClick={handleApplyUpdate}
+                size="sm"
+                className="bg-emerald-500 text-slate-950 hover:bg-emerald-400 h-9"
+                data-testid="apply-update-btn"
+              >
+                <Download className="w-3.5 h-3.5 mr-1.5" /> Apply Update
+              </Button>
+            )}
+            {updateCheck && !updateCheck.has_updates && (
+              <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                <Check className="w-3.5 h-3.5" /> Up to date
+              </span>
+            )}
+          </div>
+
+          {/* Update in progress */}
+          {applying && (
+            <div className="p-4 bg-amber-500/10 border border-amber-500/20 rounded mb-4" data-testid="update-progress">
+              <div className="flex items-center gap-2 mb-2">
+                <Loader2 className="w-4 h-4 text-amber-400 animate-spin" />
+                <span className="text-sm text-amber-400 font-medium">Update in progress...</span>
+              </div>
+              {updateStatus?.log && (
+                <pre className="text-xs text-slate-400 font-mono whitespace-pre-wrap bg-slate-950/50 rounded p-3 max-h-48 overflow-y-auto" data-testid="update-log">{updateStatus.log}</pre>
+              )}
+            </div>
+          )}
+
+          {/* Update result */}
+          {!applying && updateStatus?.status === 'success' && (
+            <div className="p-3 bg-emerald-500/10 border border-emerald-500/20 rounded mb-4 flex items-start gap-2" data-testid="update-success">
+              <Check className="w-4 h-4 text-emerald-400 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm text-emerald-400 font-medium">Update applied successfully</p>
+                {updateStatus.log && <pre className="text-xs text-slate-400 font-mono mt-2 whitespace-pre-wrap bg-slate-950/50 rounded p-3 max-h-32 overflow-y-auto">{updateStatus.log}</pre>}
+              </div>
+            </div>
+          )}
+          {!applying && updateStatus?.status === 'failed' && (
+            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded mb-4 flex items-start gap-2" data-testid="update-failed">
+              <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm text-red-400 font-medium">Update failed</p>
+                {updateStatus.log && <pre className="text-xs text-slate-400 font-mono mt-2 whitespace-pre-wrap bg-slate-950/50 rounded p-3 max-h-32 overflow-y-auto">{updateStatus.log}</pre>}
+              </div>
+            </div>
+          )}
+
+          {/* Recent commits from remote */}
+          {updateCheck?.remote_commits?.length > 0 && (
+            <div>
+              <p className="text-xs font-mono uppercase tracking-widest text-slate-600 mb-2">Recent Commits</p>
+              <div className="space-y-1">
+                {updateCheck.remote_commits.map((c, i) => (
+                  <div key={c.sha} className={`flex items-center gap-3 px-3 py-2 rounded text-xs ${
+                    c.sha === updateConfig?.current_commit ? 'bg-emerald-500/10 border border-emerald-500/20' : 'bg-slate-800/30 border border-white/5'
+                  }`} data-testid={`commit-${c.sha}`}>
+                    <span className="font-mono text-slate-400 w-14 flex-shrink-0">{c.sha}</span>
+                    <span className="text-slate-200 truncate flex-1">{c.message}</span>
+                    <span className="text-slate-500 flex-shrink-0">{c.author}</span>
+                    {c.sha === updateConfig?.current_commit && <span className="text-emerald-400 text-[10px] font-mono flex-shrink-0">CURRENT</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Server list */}
         <div className="p-6 bg-slate-900/50 border border-white/5 rounded-lg">
