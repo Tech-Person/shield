@@ -53,6 +53,8 @@ export default function VoiceChannel({ channel, server, user, ws, onVoiceJoin, o
   useEffect(() => {
     const websocket = ws?.current;
     if (!websocket) return;
+    // Subscribe to this voice channel so we receive voice_state_update broadcasts
+    try { websocket.send(JSON.stringify({ type: 'subscribe_channel', channel_id: channel.id })); } catch {}
     const handler = (event) => {
       try {
         const data = JSON.parse(event.data);

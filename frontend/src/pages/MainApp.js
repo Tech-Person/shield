@@ -12,6 +12,7 @@ import ServerSettings from '../components/ServerSettings';
 import ShareDrive from '../components/ShareDrive';
 import VoiceChannel from '../components/VoiceChannel';
 import ChannelSettings from '../components/ChannelSettings';
+import DMCall from '../components/DMCall';
 import { Menu, X, PhoneOff, Mic } from 'lucide-react';
 
 export default function MainApp() {
@@ -29,6 +30,7 @@ export default function MainApp() {
   const [showDrive, setShowDrive] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [channelSettings, setChannelSettings] = useState(null); // channel being edited
+  const [activeCall, setActiveCall] = useState(null); // { call_id, conversation_id, caller_id, caller_username }
   // Persistent voice state - survives navigation
   const [voiceState, setVoiceState] = useState(null); // { serverId, channelId, channelName }
 
@@ -96,15 +98,39 @@ export default function MainApp() {
         const data = JSON.parse(event.data);
         if (data.type === 'new_message') {
           loadConversations();
-        } else if (data.type === 'member_status_update' || data.type === 'status_update') {
-          // Refresh server data to update member online status
-          if (activeServer) loadServerData(activeServer);
+        } else if (data.type === 'incoming_call') {
+          // Find the conversation for this call
+          const conv = conversations.find(c => c.id === data.conversation_id) || { id: data.conversation_id, participants: [] };
+          setActiveCall({ ...data, conversation: conv });
+        } else if (data.type === 'call_ended' || data.type === 'call_declined') {
+          setActiveCall(null);
+        } else if (data.type === 'member_status_update') {
+          // Update member status locally without refetching entire server
+          setServerData(prev => {
+            if (!prev?.members) return prev;
+            return {
+              ...prev,
+              members: prev.members.map(m =>
+                m.user_id === data.user_id
+                  ? { ...m, status: data.status, is_online: data.is_online }
+                  : m
+              )
+            };
+          });
+        } else if (data.type === 'status_update') {
+          // Friend status update - update conversations list
+          setConversations(prev => prev.map(c => {
+            if (c.other_user?.id === data.user_id) {
+              return { ...c, other_user: { ...c.other_user, status: data.status, is_online: data.status !== 'invisible' } };
+            }
+            return c;
+          }));
         }
       } catch {}
     };
     websocket.addEventListener('message', handler);
     return () => websocket.removeEventListener('message', handler);
-  }, [ws, loadConversations, activeServer, loadServerData]);
+  }, [ws, loadConversations]);
 
   const handleSelectServer = (serverId) => {
     setActiveServer(serverId);
@@ -155,6 +181,13 @@ export default function MainApp() {
     setActiveConversation(conv);
     setActiveView('dms');
     loadConversations();
+  };
+
+  const handleStartCall = async (conv) => {
+    try {
+      const { data } = await api.post(`/dm/${conv.id}/call`);
+      setActiveCall({ ...data, conversation: conv });
+    } catch {}
   };
 
   const handleVoiceJoin = (serverId, channel) => {
@@ -273,6 +306,7 @@ export default function MainApp() {
               server={serverData}
               user={user}
               ws={ws}
+              onStartCall={activeConversation ? () => handleStartCall(activeConversation) : undefined}
             />
             {activeServer && serverData && showMembers && (
               <MembersPanel server={serverData} />
@@ -289,6 +323,17 @@ export default function MainApp() {
       </div>
 
       {mobileMenuOpen && <div className="fixed inset-0 bg-black/50 z-30 lg:hidden" onClick={() => setMobileMenuOpen(false)} />}
+
+      {/* DM Call overlay */}
+      {activeCall && (
+        <DMCall
+          conversation={activeCall.conversation || activeConversation}
+          user={user}
+          ws={ws}
+          callData={activeCall}
+          onCallEnd={() => setActiveCall(null)}
+        />
+      )}
     </div>
   );
 }

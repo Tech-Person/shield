@@ -75,7 +75,6 @@ class MessageCreate(BaseModel):
 
 class DMCreate(BaseModel):
     recipient_id: str
-    content: str
 
 class GroupDMCreate(BaseModel):
     name: Optional[str] = None

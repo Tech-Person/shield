@@ -330,15 +330,16 @@ async def update_status(data: StatusUpdate, request: Request):
         user.get("friends", []),
         {"type": "status_update", "user_id": user["id"], "status": data.status, "status_message": data.status_message}
     )
-    # Broadcast status to all servers the user is a member of
+    # Broadcast status to all servers the user is a member of (once per server via first channel)
     memberships = await db.server_members.find({"user_id": user["id"]}, {"_id": 0, "server_id": 1}).to_list(100)
     for m in memberships:
-        channels = await db.channels.find({"server_id": m["server_id"]}, {"_id": 0, "id": 1}).to_list(100)
-        for ch in channels:
-            await manager.broadcast_channel(ch["id"], {
-                "type": "member_status_update", "user_id": user["id"],
-                "status": data.status, "is_online": data.status != "invisible"
-            })
+        # Get all members of this server to notify directly
+        server_members = await db.server_members.find({"server_id": m["server_id"]}, {"_id": 0, "user_id": 1}).to_list(1000)
+        member_ids = [sm["user_id"] for sm in server_members if sm["user_id"] != user["id"]]
+        await manager.broadcast_to_users(member_ids, {
+            "type": "member_status_update", "user_id": user["id"],
+            "status": data.status, "is_online": data.status != "invisible"
+        })
     return {"message": "Status updated"}
 
 @api_router.get("/users/search")
@@ -676,13 +677,111 @@ async def send_dm_message(conversation_id: str, data: MessageCreate, request: Re
     for pid in conv["participants"]:
         if pid != user["id"]:
             await manager.send_personal(pid, broadcast_msg)
-    await manager.broadcast_dm(conversation_id, broadcast_msg, exclude=user["id"])
 
     await db.stats.update_one({"key": "global"}, {"$inc": {"messages_sent": 1}}, upsert=True)
 
     resp = broadcast_msg["message"].copy()
     resp.pop("_id", None)
     return resp
+
+# ─── DM CALLS ───
+@api_router.post("/dm/{conversation_id}/call")
+async def start_dm_call(conversation_id: str, request: Request):
+    user = await get_current_user(request)
+    conv = await db.conversations.find_one({"id": conversation_id, "participants": user["id"]}, {"_id": 0})
+    if not conv:
+        raise HTTPException(404, "Conversation not found")
+
+    call_id = str(uuid.uuid4())
+    call = {
+        "id": call_id,
+        "conversation_id": conversation_id,
+        "initiator_id": user["id"],
+        "initiator_username": user["username"],
+        "participants": [user["id"]],
+        "status": "ringing",
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    await db.calls.insert_one(call)
+
+    # Notify other participants
+    for pid in conv["participants"]:
+        if pid != user["id"]:
+            await manager.send_personal(pid, {
+                "type": "incoming_call",
+                "call_id": call_id,
+                "conversation_id": conversation_id,
+                "caller_id": user["id"],
+                "caller_username": user["username"]
+            })
+
+    call.pop("_id", None)
+    return call
+
+@api_router.post("/dm/call/{call_id}/answer")
+async def answer_dm_call(call_id: str, request: Request):
+    user = await get_current_user(request)
+    call = await db.calls.find_one({"id": call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(404, "Call not found")
+    conv = await db.conversations.find_one({"id": call["conversation_id"], "participants": user["id"]}, {"_id": 0})
+    if not conv:
+        raise HTTPException(403, "Not a participant")
+
+    await db.calls.update_one({"id": call_id}, {
+        "$set": {"status": "active"},
+        "$addToSet": {"participants": user["id"]}
+    })
+
+    # Notify all participants
+    for pid in conv["participants"]:
+        await manager.send_personal(pid, {
+            "type": "call_answered",
+            "call_id": call_id,
+            "user_id": user["id"],
+            "username": user["username"]
+        })
+
+    return {"status": "active"}
+
+@api_router.post("/dm/call/{call_id}/decline")
+async def decline_dm_call(call_id: str, request: Request):
+    user = await get_current_user(request)
+    call = await db.calls.find_one({"id": call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(404, "Call not found")
+
+    await db.calls.update_one({"id": call_id}, {"$set": {"status": "declined"}})
+    conv = await db.conversations.find_one({"id": call["conversation_id"]}, {"_id": 0})
+    if conv:
+        for pid in conv["participants"]:
+            await manager.send_personal(pid, {
+                "type": "call_declined",
+                "call_id": call_id,
+                "user_id": user["id"]
+            })
+
+    return {"status": "declined"}
+
+@api_router.post("/dm/call/{call_id}/end")
+async def end_dm_call(call_id: str, request: Request):
+    user = await get_current_user(request)
+    call = await db.calls.find_one({"id": call_id}, {"_id": 0})
+    if not call:
+        raise HTTPException(404, "Call not found")
+
+    await db.calls.update_one({"id": call_id}, {"$set": {"status": "ended", "ended_at": datetime.now(timezone.utc).isoformat()}})
+    conv = await db.conversations.find_one({"id": call["conversation_id"]}, {"_id": 0})
+    if conv:
+        for pid in conv["participants"]:
+            await manager.send_personal(pid, {
+                "type": "call_ended",
+                "call_id": call_id,
+                "user_id": user["id"]
+            })
+
+    return {"status": "ended"}
+
 
 @api_router.get("/dm/{conversation_id}/messages")
 async def get_dm_messages(conversation_id: str, request: Request, before: Optional[str] = None, limit: int = 50):
@@ -2736,7 +2835,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     except WebSocketDisconnect:
         pass
     finally:
-        manager.disconnect(user_id)
+        manager.disconnect(user_id, websocket)
         await db.users.update_one({"id": user_id}, {"$set": {"last_active": datetime.now(timezone.utc).isoformat()}})
 
 # ─── STARTUP ───

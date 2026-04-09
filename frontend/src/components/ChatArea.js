@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../lib/api';
-import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon, Sticker, CheckCheck, Lock } from 'lucide-react';
+import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon, Sticker, CheckCheck, Lock, Phone } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
@@ -13,7 +13,7 @@ import { getPrivateKey } from '../lib/keystore';
 
 const COMMON_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '✅', '❌', '💯', '🙏'];
 
-export default function ChatArea({ channel, conversation, server, user, ws }) {
+export default function ChatArea({ channel, conversation, server, user, ws, onStartCall }) {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [loading, setLoading] = useState(false);
@@ -393,6 +393,11 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
           {channel?.topic && <span className="text-xs text-slate-500 ml-2 hidden sm:inline">{channel.topic}</span>}
         </div>
         <div className="flex items-center gap-1">
+          {!isChannel && onStartCall && (
+            <button onClick={onStartCall} className="p-2 text-slate-400 hover:text-emerald-400 hover:bg-slate-800/50 rounded transition-colors" data-testid="start-call-btn">
+              <Phone className="w-4 h-4" />
+            </button>
+          )}
           {!isChannel && (
             <button onClick={() => setSearchOpen(!searchOpen)} className="p-2 text-slate-400 hover:text-slate-200 hover:bg-slate-800/50 rounded transition-colors" data-testid="search-messages-btn">
               <Search className="w-4 h-4" />
