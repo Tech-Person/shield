@@ -22,6 +22,7 @@ export function useVoiceManager(user, ws) {
   const audioDetectorCleanupRef = useRef(null);
   const remoteAudioRefs = useRef({}); // userId -> HTMLAudioElement
   const participantPollRef = useRef(null);
+  const [remoteStreamVersion, setRemoteStreamVersion] = useState(0);
 
   // Fetch TURN/STUN credentials
   useEffect(() => {
@@ -55,6 +56,7 @@ export function useVoiceManager(user, ws) {
   // Play remote audio from persistent elements (survives navigation)
   const playRemoteStream = useCallback((userId, stream) => {
     remoteStreamsRef.current[userId] = stream;
+    setRemoteStreamVersion(v => v + 1);
     // Create or reuse a persistent audio element
     let audioEl = remoteAudioRefs.current[userId];
     if (!audioEl) {
@@ -327,6 +329,7 @@ export function useVoiceManager(user, ws) {
     localStreamRef,
     screenStreamRef,
     remoteStreamsRef,
+    remoteStreamVersion,
     joinChannel,
     leaveChannel,
     toggleMute,

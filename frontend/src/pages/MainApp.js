@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import api from '../lib/api';
+import { useVoiceManager } from '../lib/voiceManager';
 import ServerSidebar from '../components/ServerSidebar';
 import ChannelSidebar from '../components/ChannelSidebar';
 import ChatArea from '../components/ChatArea';
@@ -11,9 +12,10 @@ import UserSettings from '../components/UserSettings';
 import ServerSettings from '../components/ServerSettings';
 import ShareDrive from '../components/ShareDrive';
 import VoiceChannel from '../components/VoiceChannel';
+import VoiceFloat from '../components/VoiceFloat';
 import ChannelSettings from '../components/ChannelSettings';
 import DMCall from '../components/DMCall';
-import { Menu, X, PhoneOff, Mic } from 'lucide-react';
+import { Menu, X } from 'lucide-react';
 
 export default function MainApp() {
   const { user, ws } = useAuth();
@@ -31,8 +33,9 @@ export default function MainApp() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [channelSettings, setChannelSettings] = useState(null); // channel being edited
   const [activeCall, setActiveCall] = useState(null); // { call_id, conversation_id, caller_id, caller_username }
-  // Persistent voice state - survives navigation
-  const [voiceState, setVoiceState] = useState(null); // { serverId, channelId, channelName }
+
+  // Global voice manager - peer connections & audio survive navigation
+  const voiceManager = useVoiceManager(user, ws);
 
   const loadServers = useCallback(async () => {
     try {
@@ -190,18 +193,24 @@ export default function MainApp() {
     } catch {}
   };
 
-  const handleVoiceJoin = (serverId, channel) => {
-    setVoiceState({ serverId, channelId: channel.id, channelName: channel.name });
-  };
-
-  const handleVoiceLeave = () => {
-    setVoiceState(null);
+  // Navigate back to the voice channel from the floating widget
+  const handleNavigateToVoice = () => {
+    if (voiceManager.channelInfo) {
+      const { serverId, id, name } = voiceManager.channelInfo;
+      setActiveServer(serverId);
+      setActiveConversation(null);
+      setActiveChannel({ id, name, channel_type: 'voice' });
+      setShowDrive(false);
+      setShowServerSettings(false);
+      setChannelSettings(null);
+      setMobileMenuOpen(false);
+    }
   };
 
   // Determine if we should show voice channel view
   const showVoiceView = activeServer && activeChannel?.channel_type === 'voice';
-  // Determine if persistent voice bar should show (connected to voice but viewing something else)
-  const showVoiceBar = voiceState && !(showVoiceView && voiceState.channelId === activeChannel?.id);
+  // Show floating voice widget when connected but NOT viewing the active voice channel
+  const showFloat = voiceManager.joined && !(showVoiceView && voiceManager.channelInfo?.id === activeChannel?.id);
 
   return (
     <div className="h-screen w-full flex overflow-hidden bg-[#020617]" data-testid="main-app">
@@ -252,30 +261,6 @@ export default function MainApp() {
 
       {/* Main content area */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Persistent voice bar */}
-        {showVoiceBar && (
-          <div className="h-10 bg-emerald-500/10 border-b border-emerald-500/20 flex items-center justify-between px-4 flex-shrink-0" data-testid="voice-bar">
-            <div className="flex items-center gap-2 text-sm text-emerald-400">
-              <Mic className="w-3.5 h-3.5" />
-              <span className="font-['IBM_Plex_Sans']">Connected to <strong>{voiceState.channelName}</strong></span>
-            </div>
-            <button
-              onClick={() => {
-                const websocket = ws?.current;
-                if (websocket?.readyState === WebSocket.OPEN) {
-                  websocket.send(JSON.stringify({ type: 'leave_voice', channel_id: voiceState.channelId }));
-                }
-                handleVoiceLeave();
-              }}
-              className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors"
-              data-testid="voice-disconnect-btn"
-            >
-              <PhoneOff className="w-3.5 h-3.5" />
-              Disconnect
-            </button>
-          </div>
-        )}
-
         {showSettings ? (
           <UserSettings onClose={() => setShowSettings(null)} />
         ) : showServerSettings && serverData ? (
@@ -292,9 +277,7 @@ export default function MainApp() {
               channel={activeChannel}
               server={serverData}
               user={user}
-              ws={ws}
-              onVoiceJoin={() => handleVoiceJoin(activeServer, activeChannel)}
-              onVoiceLeave={handleVoiceLeave}
+              voiceManager={voiceManager}
             />
             {showMembers && serverData && <MembersPanel server={serverData} />}
           </div>
@@ -323,6 +306,11 @@ export default function MainApp() {
       </div>
 
       {mobileMenuOpen && <div className="fixed inset-0 bg-black/50 z-30 lg:hidden" onClick={() => setMobileMenuOpen(false)} />}
+
+      {/* Floating voice controls - persists across navigation */}
+      {showFloat && (
+        <VoiceFloat voiceManager={voiceManager} onNavigateToChannel={handleNavigateToVoice} />
+      )}
 
       {/* DM Call overlay */}
       {activeCall && (
