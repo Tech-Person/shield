@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../lib/api';
-import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon, Sticker, CheckCheck } from 'lucide-react';
+import { Send, Paperclip, Search, Hash, X, Smile, MessageSquare, Pencil, Trash2, Upload, ImageIcon, Sticker, CheckCheck, Lock } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
@@ -8,6 +8,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../components/
 import { Button } from '../components/ui/button';
 import GifPicker from './GifPicker';
 import EmojiManager from './EmojiManager';
+import { encryptMessage, decryptMessage, importPublicKeyJWK, getDeviceId } from '../lib/e2e';
+import { getPrivateKey } from '../lib/keystore';
 
 const COMMON_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🔥', '🎉', '👀', '✅', '❌', '💯', '🙏'];
 
@@ -33,9 +35,69 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
   const fileInputRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const lastTypingSentRef = useRef(0);
+  const keyBundleRef = useRef(null);
+  const privateKeyRef = useRef(null);
+  const deviceIdRef = useRef(getDeviceId());
 
   const targetId = channel?.id || conversation?.id;
   const isChannel = !!channel;
+
+  // Load private key and key bundle for encryption
+  useEffect(() => {
+    (async () => {
+      try {
+        privateKeyRef.current = await getPrivateKey(deviceIdRef.current);
+      } catch {}
+    })();
+  }, []);
+
+  const loadKeyBundle = useCallback(async () => {
+    try {
+      let userIds = [];
+      if (isChannel && server?.members) {
+        userIds = server.members.map(m => m.user_id);
+      } else if (conversation?.participants) {
+        userIds = conversation.participants;
+      }
+      if (userIds.length === 0) return;
+      const { data } = await api.post('/keys/bundle', { user_ids: userIds });
+      keyBundleRef.current = data;
+    } catch {}
+  }, [isChannel, server, conversation]);
+
+  useEffect(() => {
+    loadKeyBundle();
+  }, [loadKeyBundle]);
+
+  // Decrypt a single E2E message
+  const decryptE2EMessage = useCallback(async (msg) => {
+    if (!msg.e2e || !privateKeyRef.current) return msg;
+    const myDeviceId = deviceIdRef.current;
+    const wrappedKey = msg.encrypted_keys?.[myDeviceId];
+    if (!wrappedKey) return { ...msg, content: '[Cannot decrypt - key not available for this device]' };
+    try {
+      const plaintext = await decryptMessage(msg.encrypted_content, msg.iv, wrappedKey, privateKeyRef.current);
+      return { ...msg, content: plaintext };
+    } catch {
+      return { ...msg, content: '[Decryption failed]' };
+    }
+  }, []);
+
+  // Encrypt a message for all recipients
+  const encryptForRecipients = useCallback(async (plaintext) => {
+    if (!keyBundleRef.current) return null;
+    const deviceKeys = [];
+    for (const [, devices] of Object.entries(keyBundleRef.current)) {
+      for (const d of devices) {
+        try {
+          const pubKey = await importPublicKeyJWK(d.public_key_jwk);
+          deviceKeys.push({ device_id: d.device_id, publicKey: pubKey });
+        } catch {}
+      }
+    }
+    if (deviceKeys.length === 0) return null;
+    return await encryptMessage(plaintext, deviceKeys);
+  }, []);
 
   const loadMessages = useCallback(async () => {
     if (!targetId) return;
@@ -43,10 +105,12 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
     try {
       const endpoint = isChannel ? `/channels/${channel.id}/messages` : `/dm/${conversation.id}/messages`;
       const { data } = await api.get(endpoint);
-      setMessages(data);
+      // Decrypt E2E messages
+      const decrypted = await Promise.all(data.map(msg => decryptE2EMessage(msg)));
+      setMessages(decrypted);
     } catch {}
     setLoading(false);
-  }, [targetId, isChannel, channel, conversation]);
+  }, [targetId, isChannel, channel, conversation, decryptE2EMessage]);
 
   useEffect(() => {
     setMessages([]);
@@ -88,21 +152,29 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
   useEffect(() => {
     const websocket = ws?.current;
     if (!websocket) return;
-    const handler = (event) => {
+    const handler = async (event) => {
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'new_message' && data.message.conversation_id === conversation?.id) {
-          setMessages(prev => [...prev, { ...data.message, reactions: [], thread_count: 0 }]);
+          const msg = await decryptE2EMessage(data.message);
+          setMessages(prev => [...prev, { ...msg, reactions: [], thread_count: 0 }]);
         } else if (data.type === 'channel_message' && data.message.channel_id === channel?.id) {
-          setMessages(prev => [...prev, { ...data.message, reactions: [], thread_count: 0 }]);
+          const msg = await decryptE2EMessage(data.message);
+          setMessages(prev => [...prev, { ...msg, reactions: [], thread_count: 0 }]);
         } else if (data.type === 'reaction_update') {
           setMessages(prev => prev.map(m => m.id === data.message_id ? { ...m, reactions: data.reactions } : m));
         } else if (data.type === 'message_edited') {
-          setMessages(prev => prev.map(m => m.id === data.message_id ? { ...m, content: data.content, edited: true } : m));
+          if (data.e2e) {
+            const decrypted = await decryptE2EMessage(data);
+            setMessages(prev => prev.map(m => m.id === data.message_id ? { ...m, content: decrypted.content, edited: true } : m));
+          } else {
+            setMessages(prev => prev.map(m => m.id === data.message_id ? { ...m, content: data.content, edited: true } : m));
+          }
         } else if (data.type === 'message_deleted') {
           setMessages(prev => prev.filter(m => m.id !== data.message_id));
         } else if (data.type === 'thread_reply' && threadMsg?.id === data.parent_message_id) {
-          setThreadReplies(prev => [...prev, data.reply]);
+          const reply = data.reply.e2e ? await decryptE2EMessage(data.reply) : data.reply;
+          setThreadReplies(prev => [...prev, reply]);
         } else if (data.type === 'typing' && data.user_id !== user.id) {
           setTypingUsers(prev => {
             const existing = prev.find(t => t.user_id === data.user_id);
@@ -126,15 +198,24 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
       try { websocket.send(JSON.stringify({ type: 'subscribe_dm', conversation_id: conversation.id })); } catch {}
     }
     return () => websocket.removeEventListener('message', handler);
-  }, [ws, channel, conversation, isChannel, threadMsg]);
+  }, [ws, channel, conversation, isChannel, threadMsg, decryptE2EMessage, user]);
 
   const handleSend = async (e) => {
     e.preventDefault();
     if (!newMessage.trim()) return;
     try {
       const endpoint = isChannel ? `/channels/${channel.id}/messages` : `/dm/${conversation.id}/messages`;
-      const { data } = await api.post(endpoint, { content: newMessage });
-      setMessages(prev => [...prev, { ...data, reactions: data.reactions || [], thread_count: data.thread_count || 0 }]);
+      // Try E2E encryption
+      const encrypted = await encryptForRecipients(newMessage);
+      let payload;
+      if (encrypted) {
+        payload = { content: '', e2e: true, ...encrypted };
+      } else {
+        payload = { content: newMessage };
+      }
+      const { data } = await api.post(endpoint, payload);
+      const msg = data.e2e ? { ...data, content: newMessage } : data;
+      setMessages(prev => [...prev, { ...msg, reactions: msg.reactions || [], thread_count: msg.thread_count || 0 }]);
       setNewMessage('');
       setTypingUsers([]);
       inputRef.current?.focus();
@@ -145,8 +226,11 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
     try {
       const content = `[gif](${gif.url})`;
       const endpoint = isChannel ? `/channels/${channel.id}/messages` : `/dm/${conversation.id}/messages`;
-      const { data } = await api.post(endpoint, { content });
-      setMessages(prev => [...prev, { ...data, reactions: data.reactions || [], thread_count: data.thread_count || 0 }]);
+      const encrypted = await encryptForRecipients(content);
+      const payload = encrypted ? { content: '', e2e: true, ...encrypted } : { content };
+      const { data } = await api.post(endpoint, payload);
+      const msg = data.e2e ? { ...data, content } : data;
+      setMessages(prev => [...prev, { ...msg, reactions: msg.reactions || [], thread_count: msg.thread_count || 0 }]);
     } catch {}
   };
 
@@ -156,8 +240,11 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
     const content = emoji.type === 'sticker' ? `[sticker:${emoji.name}](${emojiUrl})` : `[emoji:${emoji.name}](${emojiUrl})`;
     try {
       const endpoint = isChannel ? `/channels/${channel.id}/messages` : `/dm/${conversation.id}/messages`;
-      const { data } = await api.post(endpoint, { content });
-      setMessages(prev => [...prev, { ...data, reactions: data.reactions || [], thread_count: data.thread_count || 0 }]);
+      const encrypted = await encryptForRecipients(content);
+      const payload = encrypted ? { content: '', e2e: true, ...encrypted } : { content };
+      const { data } = await api.post(endpoint, payload);
+      const msg = data.e2e ? { ...data, content } : data;
+      setMessages(prev => [...prev, { ...msg, reactions: msg.reactions || [], thread_count: msg.thread_count || 0 }]);
       setEmojiPickerOpen(false);
     } catch {}
   };
@@ -197,7 +284,9 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
     if (!editContent.trim()) return;
     const endpoint = isChannel ? `/channel-messages/${messageId}` : `/messages/${messageId}`;
     try {
-      await api.put(endpoint, { content: editContent });
+      const encrypted = await encryptForRecipients(editContent);
+      const payload = encrypted ? { content: '', e2e: true, ...encrypted } : { content: editContent };
+      await api.put(endpoint, payload);
       setEditingId(null);
       setEditContent('');
     } catch {}
@@ -215,7 +304,8 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
     const endpoint = isChannel ? `/channel-messages/${msg.id}/thread` : `/messages/${msg.id}/thread`;
     try {
       const { data } = await api.get(endpoint);
-      setThreadReplies(data);
+      const decrypted = await Promise.all(data.map(r => decryptE2EMessage(r)));
+      setThreadReplies(decrypted);
     } catch {}
   };
 
@@ -223,8 +313,11 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
     if (!threadReply.trim() || !threadMsg) return;
     const endpoint = isChannel ? `/channel-messages/${threadMsg.id}/thread` : `/messages/${threadMsg.id}/thread`;
     try {
-      const { data } = await api.post(endpoint, { content: threadReply });
-      setThreadReplies(prev => [...prev, data]);
+      const encrypted = await encryptForRecipients(threadReply);
+      const payload = encrypted ? { content: '', e2e: true, ...encrypted } : { content: threadReply };
+      const { data } = await api.post(endpoint, payload);
+      const reply = data.e2e ? { ...data, content: threadReply } : data;
+      setThreadReplies(prev => [...prev, reply]);
       setThreadReply('');
       setMessages(prev => prev.map(m => m.id === threadMsg.id ? { ...m, thread_count: (m.thread_count || 0) + 1 } : m));
     } catch {}
@@ -369,6 +462,7 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
                           <span className="text-sm font-medium text-slate-200">{msg.sender_username}</span>
                           <span className="text-[10px] font-mono text-slate-600">{formatTime(msg.created_at)}</span>
                           {msg.edited && <span className="text-[10px] text-slate-600">(edited)</span>}
+                          {msg.e2e && <Lock className="w-3 h-3 text-emerald-500/50 inline ml-1" data-testid={`e2e-indicator-${msg.id}`} />}
                         </div>
                       )}
 
@@ -563,6 +657,7 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
           </button>
           <div className="flex-1 relative">
             <Input ref={inputRef} value={newMessage} onChange={handleMessageInput} placeholder={`Message ${isChannel ? '#' : ''}${title}`} className="bg-slate-900 border-white/10 text-slate-100 pr-10 focus:ring-1 focus:ring-emerald-500/50 font-['IBM_Plex_Sans']" data-testid="chat-message-input" />
+            {keyBundleRef.current && <Lock className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-emerald-500/60" />}
           </div>
           <button type="submit" className="p-2.5 bg-emerald-500 text-slate-950 rounded-md hover:bg-emerald-400 transition-colors disabled:opacity-50" disabled={!newMessage.trim()} data-testid="chat-send-btn">
             <Send className="w-4 h-4" />

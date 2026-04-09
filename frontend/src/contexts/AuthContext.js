@@ -1,11 +1,35 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import api from '../lib/api';
+import { generateKeyPair, exportPublicKeyJWK, getDeviceId, importPrivateKeyJWK } from '../lib/e2e';
+import { storePrivateKey, getPrivateKey, hasPrivateKey } from '../lib/keystore';
 
 const AuthContext = createContext(null);
+
+async function ensureE2EKeys() {
+  const deviceId = getDeviceId();
+  const existing = await hasPrivateKey(deviceId);
+  if (existing) return;
+
+  // Check if there's a backup we can restore from
+  try {
+    const { data: backup } = await api.get('/keys/backup');
+    if (backup?.encrypted_private_key) {
+      // User has a backup but we don't have the key yet - they'll need to restore via settings
+      // For now, generate a new key pair for this device
+    }
+  } catch {}
+
+  // Generate fresh key pair for this device
+  const keyPair = await generateKeyPair();
+  const publicJwk = await exportPublicKeyJWK(keyPair.publicKey);
+  await storePrivateKey(deviceId, keyPair.privateKey);
+  await api.post('/keys/register', { device_id: deviceId, public_key_jwk: publicJwk });
+}
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [e2eReady, setE2eReady] = useState(false);
   const wsRef = useRef(null);
   const heartbeatRef = useRef(null);
   const afkTimeoutRef = useRef(null);
@@ -31,13 +55,24 @@ export function AuthProvider({ children }) {
         if ((data.type === 'new_message' || data.type === 'channel_message') && Notification?.permission === 'granted') {
           const msg = data.message;
           if (document.hidden && msg.sender_username) {
-            new Notification(`${msg.sender_username}`, { body: msg.content?.substring(0, 100), icon: '/logo192.png', tag: msg.id });
+            const body = msg.e2e ? 'Encrypted message' : msg.content?.substring(0, 100);
+            new Notification(`${msg.sender_username}`, { body, icon: '/logo192.png', tag: msg.id });
           }
         }
       } catch {}
     };
     wsRef.current = ws;
     return ws;
+  }, []);
+
+  const initE2E = useCallback(async () => {
+    try {
+      await ensureE2EKeys();
+      setE2eReady(true);
+    } catch (err) {
+      console.error('E2E init failed:', err);
+      setE2eReady(false);
+    }
   }, []);
 
   const checkAuth = useCallback(async () => {
@@ -48,12 +83,13 @@ export function AuthProvider({ children }) {
       if (tokenResp.data.access_token) {
         connectWebSocket(tokenResp.data.access_token);
       }
+      await initE2E();
     } catch {
       setUser(false);
     } finally {
       setLoading(false);
     }
-  }, [connectWebSocket]);
+  }, [connectWebSocket, initE2E]);
 
   useEffect(() => {
     checkAuth();
@@ -90,6 +126,7 @@ export function AuthProvider({ children }) {
     if (data.requires_2fa) return data;
     setUser(data.user);
     if (data.access_token) connectWebSocket(data.access_token);
+    await initE2E();
     return data;
   };
 
@@ -97,6 +134,7 @@ export function AuthProvider({ children }) {
     const { data } = await api.post(`/auth/verify-2fa?temp_token=${tempToken}`, { code });
     setUser(data.user);
     if (data.access_token) connectWebSocket(data.access_token);
+    await initE2E();
     return data;
   };
 
@@ -104,17 +142,19 @@ export function AuthProvider({ children }) {
     const { data } = await api.post('/auth/register', { username, email, password });
     setUser(data.user);
     if (data.access_token) connectWebSocket(data.access_token);
+    await initE2E();
     return data;
   };
 
   const logout = async () => {
     await api.post('/auth/logout');
     setUser(false);
+    setE2eReady(false);
     if (wsRef.current) wsRef.current.close();
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, verify2FA, register, logout, ws: wsRef, setUser }}>
+    <AuthContext.Provider value={{ user, loading, login, verify2FA, register, logout, ws: wsRef, setUser, e2eReady }}>
       {children}
     </AuthContext.Provider>
   );

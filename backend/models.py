@@ -66,8 +66,12 @@ class RoleUpdate(BaseModel):
     permissions: Optional[int] = None
 
 class MessageCreate(BaseModel):
-    content: str
+    content: str = ""
     attachments: Optional[List[str]] = []
+    e2e: bool = False
+    encrypted_content: Optional[str] = None
+    iv: Optional[str] = None
+    encrypted_keys: Optional[dict] = None
 
 class DMCreate(BaseModel):
     recipient_id: str
@@ -90,11 +94,28 @@ class ReactionAdd(BaseModel):
     emoji: str
 
 class ThreadReply(BaseModel):
-    content: str
+    content: str = ""
     attachments: Optional[List[str]] = []
+    e2e: bool = False
+    encrypted_content: Optional[str] = None
+    iv: Optional[str] = None
+    encrypted_keys: Optional[dict] = None
 
 class MessageEdit(BaseModel):
-    content: str
+    content: str = ""
+    e2e: bool = False
+    encrypted_content: Optional[str] = None
+    iv: Optional[str] = None
+    encrypted_keys: Optional[dict] = None
+
+class DeviceKeyRegister(BaseModel):
+    device_id: str
+    public_key_jwk: dict
+
+class KeyBackupCreate(BaseModel):
+    encrypted_private_key: str
+    salt: str
+    iv: str
 
 # Permission flags (bitmask)
 class Permissions:

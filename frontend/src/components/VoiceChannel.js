@@ -17,6 +17,22 @@ export default function VoiceChannel({ channel, server, user, ws }) {
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const peerConnectionsRef = useRef({});
+  const iceServersRef = useRef(null);
+
+  // Fetch TURN/STUN credentials
+  useEffect(() => {
+    (async () => {
+      try {
+        const { data } = await api.get('/turn/credentials');
+        iceServersRef.current = data.ice_servers;
+      } catch {
+        iceServersRef.current = [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ];
+      }
+    })();
+  }, []);
 
   const loadParticipants = useCallback(async () => {
     try {
@@ -39,6 +55,14 @@ export default function VoiceChannel({ channel, server, user, ws }) {
         const data = JSON.parse(event.data);
         if (data.type === 'voice_state_update' && data.channel_id === channel.id) {
           loadParticipants();
+          // Clean up peer connections for users who left
+          if (data.user_left) {
+            const leftUserId = data.user_left;
+            const pc = peerConnectionsRef.current[leftUserId];
+            if (pc) { pc.close(); delete peerConnectionsRef.current[leftUserId]; }
+            const remoteEl = document.getElementById(`remote-video-${leftUserId}`);
+            if (remoteEl) remoteEl.remove();
+          }
         }
         if (data.type === 'webrtc_signal' && joined) {
           handleWebRTCSignal(data);
@@ -74,16 +98,28 @@ export default function VoiceChannel({ channel, server, user, ws }) {
   };
 
   const createPeerConnection = (targetUserId) => {
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ]
-    });
+    const iceConfig = iceServersRef.current || [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ];
+    const pc = new RTCPeerConnection({ iceServers: iceConfig });
     pc.onicecandidate = (event) => {
       if (event.candidate) {
         sendSignal(targetUserId, event.candidate);
       }
+    };
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
+        pc.close();
+        delete peerConnectionsRef.current[targetUserId];
+      }
+    };
+    pc.onnegotiationneeded = async () => {
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        sendSignal(targetUserId, pc.localDescription);
+      } catch {}
     };
     pc.ontrack = (event) => {
       // Create or update remote video element
@@ -131,6 +167,10 @@ export default function VoiceChannel({ channel, server, user, ws }) {
   };
 
   const joinChannel = async () => {
+    if (participants.length >= 10) {
+      alert('Voice channel is full (max 10 participants)');
+      return;
+    }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       localStreamRef.current = stream;

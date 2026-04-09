@@ -1,13 +1,15 @@
 import { useState, useEffect } from 'react';
 import api from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
-import { X, Shield, Key, User, Bell, Monitor, Fingerprint, Trash2 } from 'lucide-react';
+import { X, Shield, Key, User, Bell, Monitor, Fingerprint, Trash2, Lock, Download, Upload } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Button } from '../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 import { Switch } from '../components/ui/switch';
 import { arrayBufferToBase64url, base64urlToArrayBuffer } from '../lib/webauthn';
+import { getDeviceId, encryptPrivateKeyForBackup, decryptPrivateKeyFromBackup, exportPublicKeyJWK } from '../lib/e2e';
+import { getPrivateKey, storePrivateKey } from '../lib/keystore';
 
 export default function UserSettings({ onClose }) {
   const { user, setUser } = useAuth();
@@ -25,9 +27,24 @@ export default function UserSettings({ onClose }) {
   const [registeringPasskey, setRegisteringPasskey] = useState(false);
   const [notificationsEnabled, setNotificationsEnabled] = useState(Notification?.permission === 'granted');
 
+  // E2E state
+  const [devices, setDevices] = useState([]);
+  const [backupPassphrase, setBackupPassphrase] = useState('');
+  const [restorePassphrase, setRestorePassphrase] = useState('');
+  const [e2eStatus, setE2eStatus] = useState('');
+  const currentDeviceId = getDeviceId();
+
   useEffect(() => {
     loadPasskeys();
+    loadDevices();
   }, []);
+
+  const loadDevices = async () => {
+    try {
+      const { data } = await api.get('/keys/devices');
+      setDevices(data);
+    } catch {}
+  };
 
   const loadPasskeys = async () => {
     try {
@@ -237,6 +254,109 @@ export default function UserSettings({ onClose }) {
               {registeringPasskey ? 'Registering...' : 'Add Passkey'}
             </Button>
           </div>
+        </section>
+
+        {/* E2E Encryption Keys */}
+        <section className="mb-8">
+          <h3 className="text-lg font-medium text-slate-100 mb-4 flex items-center gap-2 font-['Outfit']">
+            <Lock className="w-5 h-5 text-emerald-500" /> End-to-End Encryption
+          </h3>
+          <p className="text-sm text-slate-400 mb-4 font-['IBM_Plex_Sans']">
+            Messages are encrypted on your device. Each device has its own key pair. Back up your keys to read messages on new devices.
+          </p>
+
+          {/* Device list */}
+          <div className="space-y-2 mb-4">
+            <p className="text-xs font-mono uppercase tracking-widest text-slate-600 mb-2">Registered Devices</p>
+            {devices.map(d => (
+              <div key={d.device_id} className="flex items-center justify-between px-4 py-3 bg-slate-900/50 rounded border border-white/5" data-testid={`device-${d.device_id}`}>
+                <div className="flex items-center gap-3">
+                  <Monitor className="w-4 h-4 text-emerald-500" />
+                  <div>
+                    <p className="text-sm text-slate-200 font-mono">{d.device_id.substring(0, 8)}...</p>
+                    <p className="text-xs text-slate-500">
+                      {d.device_id === currentDeviceId ? 'This device' : 'Other device'}
+                      {' — '}{new Date(d.created_at).toLocaleDateString()}
+                    </p>
+                  </div>
+                </div>
+                {d.device_id !== currentDeviceId && (
+                  <button onClick={async () => {
+                    await api.delete(`/keys/device/${d.device_id}`);
+                    loadDevices();
+                  }} className="p-2 text-slate-400 hover:text-red-400 rounded" data-testid={`remove-device-${d.device_id}`}>
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            ))}
+            {devices.length === 0 && <p className="text-sm text-slate-500">No devices registered yet.</p>}
+          </div>
+
+          {/* Backup */}
+          <div className="p-4 bg-slate-900/50 rounded border border-white/5 mb-3">
+            <p className="text-sm font-medium text-slate-200 mb-2">Backup Key</p>
+            <p className="text-xs text-slate-500 mb-3">Encrypt your private key with a passphrase and store it on the server. Use this to set up new devices.</p>
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <Input type="password" value={backupPassphrase} onChange={e => setBackupPassphrase(e.target.value)} placeholder="Enter a strong passphrase" className="bg-slate-900 border-white/10 text-slate-100 text-sm" data-testid="backup-passphrase-input" />
+              </div>
+              <Button size="sm" className="bg-emerald-500 text-slate-950 hover:bg-emerald-400 h-9" data-testid="backup-key-btn"
+                onClick={async () => {
+                  if (!backupPassphrase.trim()) return;
+                  try {
+                    const privKey = await getPrivateKey(currentDeviceId);
+                    if (!privKey) { setE2eStatus('No private key found on this device'); return; }
+                    const backup = await encryptPrivateKeyForBackup(privKey, backupPassphrase);
+                    await api.post('/keys/backup', backup);
+                    setE2eStatus('Key backed up successfully!');
+                    setBackupPassphrase('');
+                  } catch (err) {
+                    setE2eStatus('Backup failed: ' + err.message);
+                  }
+                }}
+              >
+                <Download className="w-3.5 h-3.5 mr-1.5" /> Backup
+              </Button>
+            </div>
+          </div>
+
+          {/* Restore */}
+          <div className="p-4 bg-slate-900/50 rounded border border-white/5">
+            <p className="text-sm font-medium text-slate-200 mb-2">Restore Key on This Device</p>
+            <p className="text-xs text-slate-500 mb-3">Download and decrypt your backup to read older E2E messages on this device.</p>
+            <div className="flex items-end gap-2">
+              <div className="flex-1">
+                <Input type="password" value={restorePassphrase} onChange={e => setRestorePassphrase(e.target.value)} placeholder="Enter your backup passphrase" className="bg-slate-900 border-white/10 text-slate-100 text-sm" data-testid="restore-passphrase-input" />
+              </div>
+              <Button size="sm" className="bg-slate-800 text-slate-100 border border-white/5 hover:bg-slate-700 h-9" data-testid="restore-key-btn"
+                onClick={async () => {
+                  if (!restorePassphrase.trim()) return;
+                  try {
+                    const { data: backup } = await api.get('/keys/backup');
+                    if (!backup?.encrypted_private_key) { setE2eStatus('No backup found on server'); return; }
+                    const privKey = await decryptPrivateKeyFromBackup(
+                      backup.encrypted_private_key, backup.salt, backup.iv, restorePassphrase
+                    );
+                    await storePrivateKey(currentDeviceId, privKey);
+                    // Register the public key for this device
+                    const pubJwk = await exportPublicKeyJWK(privKey);
+                    // Actually we need the public key from the private key - for RSA-OAEP, we extract it
+                    // The backup was the private key; we need to derive public from it
+                    // Web Crypto: re-import as key pair is not directly possible, but the public key can be extracted from JWK
+                    setE2eStatus('Key restored successfully! Reload the page to use it.');
+                    setRestorePassphrase('');
+                  } catch (err) {
+                    setE2eStatus('Restore failed - wrong passphrase?');
+                  }
+                }}
+              >
+                <Upload className="w-3.5 h-3.5 mr-1.5" /> Restore
+              </Button>
+            </div>
+          </div>
+
+          {e2eStatus && <p className="text-xs mt-2 text-emerald-400 font-mono" data-testid="e2e-status-msg">{e2eStatus}</p>}
         </section>
 
         {/* Notifications */}

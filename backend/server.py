@@ -28,7 +28,8 @@ from models import (
     UserCreate, UserLogin, TwoFactorVerify, UserUpdate, StatusUpdate,
     FriendRequest, ServerCreate, ServerUpdate, ChannelCreate, ChannelUpdate,
     RoleCreate, RoleUpdate, MessageCreate, DMCreate, GroupDMCreate,
-    SearchQuery, InviteCreate, Permissions, ReactionAdd, ThreadReply, MessageEdit
+    SearchQuery, InviteCreate, Permissions, ReactionAdd, ThreadReply, MessageEdit,
+    DeviceKeyRegister, KeyBackupCreate
 )
 from encryption import encrypt_text, decrypt_text
 from websocket_manager import manager
@@ -450,6 +451,78 @@ async def get_friends(request: Request):
             pending_out.append(p)
     return {"friends": friends, "pending_incoming": pending_in, "pending_outgoing": pending_out, "blocked": full_user.get("blocked", [])}
 
+
+# ─── E2E KEY MANAGEMENT ───
+@api_router.post("/keys/register")
+async def register_device_key(data: DeviceKeyRegister, request: Request):
+    user = await get_current_user(request)
+    await db.device_keys.update_one(
+        {"user_id": user["id"], "device_id": data.device_id},
+        {"$set": {
+            "user_id": user["id"],
+            "device_id": data.device_id,
+            "public_key_jwk": data.public_key_jwk,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }},
+        upsert=True
+    )
+    return {"status": "ok"}
+
+@api_router.get("/keys/devices")
+async def get_my_devices(request: Request):
+    user = await get_current_user(request)
+    keys = await db.device_keys.find({"user_id": user["id"]}, {"_id": 0}).to_list(50)
+    return keys
+
+@api_router.get("/keys/user/{user_id}")
+async def get_user_keys(user_id: str, request: Request):
+    await get_current_user(request)
+    keys = await db.device_keys.find({"user_id": user_id}, {"_id": 0}).to_list(50)
+    return keys
+
+@api_router.post("/keys/bundle")
+async def get_key_bundle(request: Request):
+    await get_current_user(request)
+    body = await request.json()
+    user_ids = body.get("user_ids", [])
+    keys = await db.device_keys.find({"user_id": {"$in": user_ids}}, {"_id": 0}).to_list(1000)
+    bundle = {}
+    for k in keys:
+        uid = k["user_id"]
+        if uid not in bundle:
+            bundle[uid] = []
+        bundle[uid].append({"device_id": k["device_id"], "public_key_jwk": k["public_key_jwk"]})
+    return bundle
+
+@api_router.delete("/keys/device/{device_id}")
+async def remove_device_key(device_id: str, request: Request):
+    user = await get_current_user(request)
+    await db.device_keys.delete_one({"user_id": user["id"], "device_id": device_id})
+    return {"status": "ok"}
+
+@api_router.post("/keys/backup")
+async def store_key_backup(data: KeyBackupCreate, request: Request):
+    user = await get_current_user(request)
+    await db.key_backups.update_one(
+        {"user_id": user["id"]},
+        {"$set": {
+            "user_id": user["id"],
+            "encrypted_private_key": data.encrypted_private_key,
+            "salt": data.salt,
+            "iv": data.iv,
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }},
+        upsert=True
+    )
+    return {"status": "ok"}
+
+@api_router.get("/keys/backup")
+async def get_key_backup(request: Request):
+    user = await get_current_user(request)
+    backup = await db.key_backups.find_one({"user_id": user["id"]}, {"_id": 0})
+    return backup or {}
+
+
 # ─── DM ROUTES ───
 @api_router.post("/dm/create")
 async def create_dm(data: DMCreate, request: Request):
@@ -509,7 +582,10 @@ async def get_conversations(request: Request):
         last_msg = await db.messages.find_one(
             {"conversation_id": conv["id"]}, {"_id": 0}, sort=[("created_at", -1)]
         )
-        if last_msg and last_msg.get("content_encrypted"):
+        if last_msg and last_msg.get("e2e"):
+            last_msg.pop("content_encrypted", None)
+            last_msg.pop("search_index", None)
+        elif last_msg and last_msg.get("content_encrypted"):
             last_msg["content"] = decrypt_text(last_msg["content_encrypted"])
             last_msg.pop("content_encrypted", None)
             last_msg.pop("search_index", None)
@@ -524,23 +600,41 @@ async def send_dm_message(conversation_id: str, data: MessageCreate, request: Re
         raise HTTPException(404, "Conversation not found")
 
     msg_id = str(uuid.uuid4())
-    encrypted_content = encrypt_text(data.content)
-    search_tokens = " ".join(data.content.lower().split())
+    now = datetime.now(timezone.utc).isoformat()
 
-    msg = {
-        "id": msg_id,
-        "conversation_id": conversation_id,
-        "sender_id": user["id"],
-        "sender_username": user["username"],
-        "sender_avatar": user.get("avatar_url"),
-        "content_encrypted": encrypted_content,
-        "search_index": encrypt_text(search_tokens),
-        "attachments": data.attachments or [],
-        "edited": False,
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
+    if data.e2e and data.encrypted_content:
+        msg = {
+            "id": msg_id,
+            "conversation_id": conversation_id,
+            "sender_id": user["id"],
+            "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "e2e": True,
+            "encrypted_content": data.encrypted_content,
+            "iv": data.iv,
+            "encrypted_keys": data.encrypted_keys or {},
+            "attachments": data.attachments or [],
+            "edited": False,
+            "created_at": now
+        }
+    else:
+        encrypted_content = encrypt_text(data.content)
+        search_tokens = " ".join(data.content.lower().split())
+        msg = {
+            "id": msg_id,
+            "conversation_id": conversation_id,
+            "sender_id": user["id"],
+            "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "content_encrypted": encrypted_content,
+            "search_index": encrypt_text(search_tokens),
+            "attachments": data.attachments or [],
+            "edited": False,
+            "created_at": now
+        }
+
     await db.messages.insert_one(msg)
-    await db.conversations.update_one({"id": conversation_id}, {"$set": {"last_message_at": datetime.now(timezone.utc).isoformat()}})
+    await db.conversations.update_one({"id": conversation_id}, {"$set": {"last_message_at": now}})
 
     broadcast_msg = {
         "type": "new_message",
@@ -550,12 +644,19 @@ async def send_dm_message(conversation_id: str, data: MessageCreate, request: Re
             "sender_id": user["id"],
             "sender_username": user["username"],
             "sender_avatar": user.get("avatar_url"),
-            "content": data.content,
             "attachments": data.attachments or [],
             "edited": False,
-            "created_at": msg["created_at"]
+            "created_at": now
         }
     }
+    if data.e2e:
+        broadcast_msg["message"]["e2e"] = True
+        broadcast_msg["message"]["encrypted_content"] = data.encrypted_content
+        broadcast_msg["message"]["iv"] = data.iv
+        broadcast_msg["message"]["encrypted_keys"] = data.encrypted_keys or {}
+    else:
+        broadcast_msg["message"]["content"] = data.content
+
     for pid in conv["participants"]:
         if pid != user["id"]:
             await manager.send_personal(pid, broadcast_msg)
@@ -580,7 +681,10 @@ async def get_dm_messages(conversation_id: str, request: Request, before: Option
 
     messages = await db.messages.find(query, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
     for msg in messages:
-        if msg.get("content_encrypted"):
+        if msg.get("e2e"):
+            # E2E message: pass through encrypted data, client decrypts
+            pass
+        elif msg.get("content_encrypted"):
             msg["content"] = decrypt_text(msg["content_encrypted"])
         msg.pop("content_encrypted", None)
         msg.pop("search_index", None)
@@ -885,19 +989,38 @@ async def send_channel_message(channel_id: str, data: MessageCreate, request: Re
                 raise HTTPException(429, f"Slowmode active. Wait {int(channel['slowmode_seconds'] - diff)}s")
 
     msg_id = str(uuid.uuid4())
-    encrypted_content = encrypt_text(data.content)
-    msg = {
-        "id": msg_id,
-        "channel_id": channel_id,
-        "server_id": channel["server_id"],
-        "sender_id": user["id"],
-        "sender_username": user["username"],
-        "sender_avatar": user.get("avatar_url"),
-        "content_encrypted": encrypted_content,
-        "attachments": data.attachments or [],
-        "edited": False,
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
+    now = datetime.now(timezone.utc).isoformat()
+
+    if data.e2e and data.encrypted_content:
+        msg = {
+            "id": msg_id,
+            "channel_id": channel_id,
+            "server_id": channel["server_id"],
+            "sender_id": user["id"],
+            "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "e2e": True,
+            "encrypted_content": data.encrypted_content,
+            "iv": data.iv,
+            "encrypted_keys": data.encrypted_keys or {},
+            "attachments": data.attachments or [],
+            "edited": False,
+            "created_at": now
+        }
+    else:
+        encrypted_content = encrypt_text(data.content)
+        msg = {
+            "id": msg_id,
+            "channel_id": channel_id,
+            "server_id": channel["server_id"],
+            "sender_id": user["id"],
+            "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "content_encrypted": encrypted_content,
+            "attachments": data.attachments or [],
+            "edited": False,
+            "created_at": now
+        }
     await db.channel_messages.insert_one(msg)
 
     broadcast_msg = {
@@ -909,12 +1032,19 @@ async def send_channel_message(channel_id: str, data: MessageCreate, request: Re
             "sender_id": user["id"],
             "sender_username": user["username"],
             "sender_avatar": user.get("avatar_url"),
-            "content": data.content,
             "attachments": data.attachments or [],
             "edited": False,
-            "created_at": msg["created_at"]
+            "created_at": now
         }
     }
+    if data.e2e:
+        broadcast_msg["message"]["e2e"] = True
+        broadcast_msg["message"]["encrypted_content"] = data.encrypted_content
+        broadcast_msg["message"]["iv"] = data.iv
+        broadcast_msg["message"]["encrypted_keys"] = data.encrypted_keys or {}
+    else:
+        broadcast_msg["message"]["content"] = data.content
+
     await manager.broadcast_channel(channel_id, broadcast_msg, exclude=user["id"])
     await db.stats.update_one({"key": "global"}, {"$inc": {"messages_sent": 1}}, upsert=True)
 
@@ -936,7 +1066,9 @@ async def get_channel_messages(channel_id: str, request: Request, before: Option
         query["created_at"] = {"$lt": before}
     messages = await db.channel_messages.find(query, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
     for msg in messages:
-        if msg.get("content_encrypted"):
+        if msg.get("e2e"):
+            pass
+        elif msg.get("content_encrypted"):
             msg["content"] = decrypt_text(msg["content_encrypted"])
         msg.pop("content_encrypted", None)
         msg["reactions"] = await db.reactions.find({"message_id": msg["id"]}, {"_id": 0}).to_list(50)
@@ -1098,35 +1230,57 @@ async def reply_dm_thread(message_id: str, data: ThreadReply, request: Request):
     if not conv:
         raise HTTPException(403, "Not a participant")
     reply_id = str(uuid.uuid4())
-    encrypted_content = encrypt_text(data.content)
-    reply = {
-        "id": reply_id,
-        "parent_message_id": message_id,
-        "conversation_id": parent["conversation_id"],
-        "sender_id": user["id"],
-        "sender_username": user["username"],
-        "sender_avatar": user.get("avatar_url"),
-        "content_encrypted": encrypted_content,
-        "attachments": data.attachments or [],
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
+    now = datetime.now(timezone.utc).isoformat()
+
+    if data.e2e and data.encrypted_content:
+        reply = {
+            "id": reply_id, "parent_message_id": message_id,
+            "conversation_id": parent["conversation_id"],
+            "sender_id": user["id"], "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "e2e": True, "encrypted_content": data.encrypted_content,
+            "iv": data.iv, "encrypted_keys": data.encrypted_keys or {},
+            "attachments": data.attachments or [], "created_at": now
+        }
+    else:
+        reply = {
+            "id": reply_id, "parent_message_id": message_id,
+            "conversation_id": parent["conversation_id"],
+            "sender_id": user["id"], "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "content_encrypted": encrypt_text(data.content),
+            "attachments": data.attachments or [], "created_at": now
+        }
+
     await db.thread_replies.insert_one(reply)
     await db.messages.update_one({"id": message_id}, {"$inc": {"thread_count": 1}})
-    broadcast = {"type": "thread_reply", "parent_message_id": message_id, "reply": {
+
+    broadcast_reply = {
         "id": reply_id, "parent_message_id": message_id, "sender_id": user["id"],
-        "sender_username": user["username"], "content": data.content,
-        "attachments": data.attachments or [], "created_at": reply["created_at"]
-    }}
+        "sender_username": user["username"],
+        "attachments": data.attachments or [], "created_at": now
+    }
+    if data.e2e:
+        broadcast_reply["e2e"] = True
+        broadcast_reply["encrypted_content"] = data.encrypted_content
+        broadcast_reply["iv"] = data.iv
+        broadcast_reply["encrypted_keys"] = data.encrypted_keys or {}
+    else:
+        broadcast_reply["content"] = data.content
+
+    broadcast = {"type": "thread_reply", "parent_message_id": message_id, "reply": broadcast_reply}
     for pid in conv["participants"]:
         await manager.send_personal(pid, broadcast)
-    return broadcast["reply"]
+    return broadcast_reply
 
 @api_router.get("/messages/{message_id}/thread")
 async def get_dm_thread(message_id: str, request: Request):
     await get_current_user(request)
     replies = await db.thread_replies.find({"parent_message_id": message_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
     for r in replies:
-        if r.get("content_encrypted"):
+        if r.get("e2e"):
+            pass
+        elif r.get("content_encrypted"):
             r["content"] = decrypt_text(r["content_encrypted"])
         r.pop("content_encrypted", None)
     return replies
@@ -1145,35 +1299,56 @@ async def reply_channel_thread(message_id: str, data: ThreadReply, request: Requ
     if not has_permission(member_perms, Permissions.SEND_MESSAGES_IN_THREADS):
         raise HTTPException(403, "No permission to send messages in threads")
     reply_id = str(uuid.uuid4())
-    encrypted_content = encrypt_text(data.content)
-    reply = {
-        "id": reply_id,
-        "parent_message_id": message_id,
-        "channel_id": parent["channel_id"],
-        "server_id": parent["server_id"],
-        "sender_id": user["id"],
-        "sender_username": user["username"],
-        "sender_avatar": user.get("avatar_url"),
-        "content_encrypted": encrypted_content,
-        "attachments": data.attachments or [],
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
+    now = datetime.now(timezone.utc).isoformat()
+
+    if data.e2e and data.encrypted_content:
+        reply = {
+            "id": reply_id, "parent_message_id": message_id,
+            "channel_id": parent["channel_id"], "server_id": parent["server_id"],
+            "sender_id": user["id"], "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "e2e": True, "encrypted_content": data.encrypted_content,
+            "iv": data.iv, "encrypted_keys": data.encrypted_keys or {},
+            "attachments": data.attachments or [], "created_at": now
+        }
+    else:
+        reply = {
+            "id": reply_id, "parent_message_id": message_id,
+            "channel_id": parent["channel_id"], "server_id": parent["server_id"],
+            "sender_id": user["id"], "sender_username": user["username"],
+            "sender_avatar": user.get("avatar_url"),
+            "content_encrypted": encrypt_text(data.content),
+            "attachments": data.attachments or [], "created_at": now
+        }
+
     await db.thread_replies.insert_one(reply)
     await db.channel_messages.update_one({"id": message_id}, {"$inc": {"thread_count": 1}})
-    broadcast = {"type": "thread_reply", "parent_message_id": message_id, "reply": {
+
+    broadcast_reply = {
         "id": reply_id, "parent_message_id": message_id, "sender_id": user["id"],
-        "sender_username": user["username"], "content": data.content,
-        "attachments": data.attachments or [], "created_at": reply["created_at"]
-    }}
+        "sender_username": user["username"],
+        "attachments": data.attachments or [], "created_at": now
+    }
+    if data.e2e:
+        broadcast_reply["e2e"] = True
+        broadcast_reply["encrypted_content"] = data.encrypted_content
+        broadcast_reply["iv"] = data.iv
+        broadcast_reply["encrypted_keys"] = data.encrypted_keys or {}
+    else:
+        broadcast_reply["content"] = data.content
+
+    broadcast = {"type": "thread_reply", "parent_message_id": message_id, "reply": broadcast_reply}
     await manager.broadcast_channel(parent["channel_id"], broadcast)
-    return broadcast["reply"]
+    return broadcast_reply
 
 @api_router.get("/channel-messages/{message_id}/thread")
 async def get_channel_thread(message_id: str, request: Request):
     await get_current_user(request)
     replies = await db.thread_replies.find({"parent_message_id": message_id}, {"_id": 0}).sort("created_at", 1).to_list(200)
     for r in replies:
-        if r.get("content_encrypted"):
+        if r.get("e2e"):
+            pass
+        elif r.get("content_encrypted"):
             r["content"] = decrypt_text(r["content_encrypted"])
         r.pop("content_encrypted", None)
     return replies
@@ -1185,12 +1360,23 @@ async def edit_dm_message(message_id: str, data: MessageEdit, request: Request):
     msg = await db.messages.find_one({"id": message_id, "sender_id": user["id"]}, {"_id": 0})
     if not msg:
         raise HTTPException(404, "Message not found or not yours")
-    encrypted = encrypt_text(data.content)
-    await db.messages.update_one({"id": message_id}, {"$set": {"content_encrypted": encrypted, "edited": True}})
+    if data.e2e and data.encrypted_content:
+        await db.messages.update_one({"id": message_id}, {"$set": {
+            "e2e": True, "encrypted_content": data.encrypted_content,
+            "iv": data.iv, "encrypted_keys": data.encrypted_keys or {},
+            "edited": True
+        }, "$unset": {"content_encrypted": ""}})
+        broadcast = {"type": "message_edited", "message_id": message_id, "edited": True,
+                      "e2e": True, "encrypted_content": data.encrypted_content,
+                      "iv": data.iv, "encrypted_keys": data.encrypted_keys or {}}
+    else:
+        encrypted = encrypt_text(data.content)
+        await db.messages.update_one({"id": message_id}, {"$set": {"content_encrypted": encrypted, "edited": True}})
+        broadcast = {"type": "message_edited", "message_id": message_id, "content": data.content, "edited": True}
     conv = await db.conversations.find_one({"id": msg["conversation_id"]}, {"_id": 0})
     if conv:
         for pid in conv["participants"]:
-            await manager.send_personal(pid, {"type": "message_edited", "message_id": message_id, "content": data.content, "edited": True})
+            await manager.send_personal(pid, broadcast)
     return {"message": "Edited"}
 
 @api_router.delete("/messages/{message_id}")
@@ -1214,9 +1400,20 @@ async def edit_channel_message(message_id: str, data: MessageEdit, request: Requ
     msg = await db.channel_messages.find_one({"id": message_id, "sender_id": user["id"]}, {"_id": 0})
     if not msg:
         raise HTTPException(404, "Message not found or not yours")
-    encrypted = encrypt_text(data.content)
-    await db.channel_messages.update_one({"id": message_id}, {"$set": {"content_encrypted": encrypted, "edited": True}})
-    await manager.broadcast_channel(msg["channel_id"], {"type": "message_edited", "message_id": message_id, "content": data.content, "edited": True})
+    if data.e2e and data.encrypted_content:
+        await db.channel_messages.update_one({"id": message_id}, {"$set": {
+            "e2e": True, "encrypted_content": data.encrypted_content,
+            "iv": data.iv, "encrypted_keys": data.encrypted_keys or {},
+            "edited": True
+        }, "$unset": {"content_encrypted": ""}})
+        broadcast = {"type": "message_edited", "message_id": message_id, "edited": True,
+                      "e2e": True, "encrypted_content": data.encrypted_content,
+                      "iv": data.iv, "encrypted_keys": data.encrypted_keys or {}}
+    else:
+        encrypted = encrypt_text(data.content)
+        await db.channel_messages.update_one({"id": message_id}, {"$set": {"content_encrypted": encrypted, "edited": True}})
+        broadcast = {"type": "message_edited", "message_id": message_id, "content": data.content, "edited": True}
+    await manager.broadcast_channel(msg["channel_id"], broadcast)
     return {"message": "Edited"}
 
 @api_router.delete("/channel-messages/{message_id}")
@@ -1914,6 +2111,124 @@ async def admin_deny_storage(request_id: str, request: Request):
     await db.storage_requests.update_one({"id": request_id}, {"$set": {"status": "denied", "admin_note": body.get("note", "")}})
     return {"message": "Storage request denied"}
 
+# ─── TURN SERVER MANAGEMENT ───
+import hmac
+import hashlib
+import time as _time
+
+@api_router.get("/turn/credentials")
+async def get_turn_credentials(request: Request):
+    """Get time-limited TURN credentials for WebRTC clients"""
+    user = await get_current_user(request)
+    turn_config = await db.settings.find_one({"key": "turn_server"}, {"_id": 0})
+    if not turn_config or not turn_config.get("enabled"):
+        return {"ice_servers": [
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun1.l.google.com:19302"}
+        ]}
+
+    host = turn_config.get("host", "127.0.0.1")
+    port = turn_config.get("port", 3478)
+    secret = turn_config.get("shared_secret", "")
+    ttl = 86400  # 24h
+    timestamp = int(_time.time()) + ttl
+    username = f"{timestamp}:{user['id']}"
+    h = hmac.new(secret.encode(), username.encode(), hashlib.sha1)
+    credential = base64.b64encode(h.digest()).decode()
+
+    return {"ice_servers": [
+        {"urls": "stun:stun.l.google.com:19302"},
+        {"urls": f"turn:{host}:{port}?transport=udp", "username": username, "credential": credential},
+        {"urls": f"turn:{host}:{port}?transport=tcp", "username": username, "credential": credential},
+        {"urls": f"turns:{host}:{port + 1}?transport=tcp", "username": username, "credential": credential}
+    ]}
+
+@api_router.get("/admin/turn/config")
+async def get_turn_config(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    config = await db.settings.find_one({"key": "turn_server"}, {"_id": 0})
+    if not config:
+        config = {"key": "turn_server", "enabled": False, "host": "", "port": 3478, "shared_secret": "", "status": "stopped"}
+    return config
+
+@api_router.put("/admin/turn/config")
+async def update_turn_config(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    body = await request.json()
+    allowed = {"host", "port", "shared_secret", "enabled", "realm"}
+    update = {k: v for k, v in body.items() if k in allowed}
+    update["key"] = "turn_server"
+    await db.settings.update_one({"key": "turn_server"}, {"$set": update}, upsert=True)
+    return {"status": "ok"}
+
+@api_router.post("/admin/turn/start")
+async def start_turn_server(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    config = await db.settings.find_one({"key": "turn_server"}, {"_id": 0})
+    secret = config.get("shared_secret", "shield-turn-secret") if config else "shield-turn-secret"
+    realm = config.get("realm", "shield.local") if config else "shield.local"
+    port = config.get("port", 3478) if config else 3478
+
+    try:
+        result = subprocess.run(
+            ["docker", "run", "-d", "--name", "shield-coturn", "--network=host", "--restart=unless-stopped",
+             "coturn/coturn:latest",
+             f"--listening-port={port}", f"--tls-listening-port={port + 1}",
+             f"--realm={realm}", "--use-auth-secret", f"--static-auth-secret={secret}",
+             "--no-cli", "--no-tls", "--no-dtls",
+             "--fingerprint", "--lt-cred-mech",
+             "--min-port=49152", "--max-port=65535"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode != 0:
+            # Maybe container exists, try start
+            result2 = subprocess.run(["docker", "start", "shield-coturn"], capture_output=True, text=True, timeout=15)
+            if result2.returncode != 0:
+                raise HTTPException(500, f"Failed to start TURN: {result.stderr} {result2.stderr}")
+
+        await db.settings.update_one({"key": "turn_server"}, {"$set": {"enabled": True, "status": "running", "shared_secret": secret, "port": port, "realm": realm}}, upsert=True)
+        return {"status": "running"}
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "Docker command timed out")
+    except FileNotFoundError:
+        raise HTTPException(500, "Docker not installed on this server")
+
+@api_router.post("/admin/turn/stop")
+async def stop_turn_server(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    try:
+        subprocess.run(["docker", "stop", "shield-coturn"], capture_output=True, text=True, timeout=15)
+        subprocess.run(["docker", "rm", "shield-coturn"], capture_output=True, text=True, timeout=15)
+        await db.settings.update_one({"key": "turn_server"}, {"$set": {"enabled": False, "status": "stopped"}}, upsert=True)
+        return {"status": "stopped"}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to stop TURN: {str(e)}")
+
+@api_router.get("/admin/turn/status")
+async def get_turn_status(request: Request):
+    user = await get_current_user(request)
+    if user.get("role") != "admin":
+        raise HTTPException(403, "Admin access required")
+    try:
+        result = subprocess.run(["docker", "inspect", "-f", "{{.State.Status}}", "shield-coturn"],
+                                capture_output=True, text=True, timeout=10)
+        status = result.stdout.strip() if result.returncode == 0 else "not_found"
+    except FileNotFoundError:
+        status = "docker_not_installed"
+    except Exception:
+        status = "error"
+    return {"container_status": status}
+
+
+
 # ─── ADMIN ROUTES ───
 @api_router.get("/admin/stats")
 async def get_admin_stats(request: Request):
@@ -2415,6 +2730,9 @@ async def startup():
     await db.saved_emojis.create_index([("user_id", 1), ("emoji_id", 1)], unique=True)
     await db.storage_requests.create_index("server_id")
     await db.storage_requests.create_index("status")
+    await db.device_keys.create_index([("user_id", 1), ("device_id", 1)], unique=True)
+    await db.device_keys.create_index("user_id")
+    await db.key_backups.create_index("user_id", unique=True)
 
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@shield.local")
     admin_password = os.environ.get("ADMIN_PASSWORD", "SecureAdmin2024!")

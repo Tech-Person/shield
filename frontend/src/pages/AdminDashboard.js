@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import api from '../lib/api';
-import { Shield, Users, MessageCircle, Server, HardDrive, Mic, ArrowLeft, RefreshCw, Download, GitBranch, Check, AlertCircle, Loader2, Settings2 } from 'lucide-react';
+import { Shield, Users, MessageCircle, Server, HardDrive, Mic, ArrowLeft, RefreshCw, Download, GitBranch, Check, AlertCircle, Loader2, Settings2, Radio, Play, Square } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { ScrollArea } from '../components/ui/scroll-area';
@@ -25,6 +25,16 @@ export default function AdminDashboard() {
   const [editRepo, setEditRepo] = useState(false);
   const [repoInput, setRepoInput] = useState('');
   const pollRef = useRef(null);
+
+  // TURN server state
+  const [turnConfig, setTurnConfig] = useState(null);
+  const [turnStatus, setTurnStatus] = useState(null);
+  const [turnLoading, setTurnLoading] = useState(false);
+  const [editTurn, setEditTurn] = useState(false);
+  const [turnHost, setTurnHost] = useState('');
+  const [turnPort, setTurnPort] = useState('3478');
+  const [turnSecret, setTurnSecret] = useState('');
+  const [turnRealm, setTurnRealm] = useState('');
 
   const loadStats = useCallback(async () => {
     try {
@@ -82,6 +92,57 @@ export default function AdminDashboard() {
   useEffect(() => {
     if (user?.role === 'admin') loadUpdateConfig();
   }, [user, loadUpdateConfig]);
+
+  // Load TURN config
+  const loadTurnConfig = useCallback(async () => {
+    try {
+      const [configRes, statusRes] = await Promise.all([
+        api.get('/admin/turn/config'),
+        api.get('/admin/turn/status')
+      ]);
+      setTurnConfig(configRes.data);
+      setTurnStatus(statusRes.data);
+      setTurnHost(configRes.data.host || '');
+      setTurnPort(String(configRes.data.port || 3478));
+      setTurnSecret(configRes.data.shared_secret || '');
+      setTurnRealm(configRes.data.realm || '');
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (user?.role === 'admin') loadTurnConfig();
+  }, [user, loadTurnConfig]);
+
+  const handleStartTurn = async () => {
+    setTurnLoading(true);
+    try {
+      await api.post('/admin/turn/start');
+      await loadTurnConfig();
+    } catch {}
+    setTurnLoading(false);
+  };
+
+  const handleStopTurn = async () => {
+    setTurnLoading(true);
+    try {
+      await api.post('/admin/turn/stop');
+      await loadTurnConfig();
+    } catch {}
+    setTurnLoading(false);
+  };
+
+  const handleSaveTurnConfig = async () => {
+    try {
+      await api.put('/admin/turn/config', {
+        host: turnHost.trim(),
+        port: parseInt(turnPort) || 3478,
+        shared_secret: turnSecret.trim(),
+        realm: turnRealm.trim()
+      });
+      setEditTurn(false);
+      await loadTurnConfig();
+    } catch {}
+  };
 
   // Poll update status while in-progress
   useEffect(() => {
@@ -229,6 +290,85 @@ export default function AdminDashboard() {
             </div>
           </div>
         )}
+
+        {/* TURN Server Management */}
+        <div className="mb-8 p-6 bg-slate-900/50 border border-white/5 rounded-lg" data-testid="turn-panel">
+          <div className="flex items-center gap-2 mb-5">
+            <Radio className="w-4 h-4 text-emerald-500" />
+            <h3 className="text-sm font-medium text-slate-200 font-['Outfit']">TURN Server (Voice/Video Relay)</h3>
+            <span className={`ml-auto text-xs font-mono px-2 py-0.5 rounded-full ${
+              turnStatus?.container_status === 'running'
+                ? 'bg-emerald-500/20 text-emerald-400'
+                : 'bg-slate-700/50 text-slate-500'
+            }`} data-testid="turn-status-badge">
+              {turnStatus?.container_status || 'unknown'}
+            </span>
+          </div>
+
+          {/* Config display/edit */}
+          {editTurn ? (
+            <div className="space-y-3 mb-4 p-3 bg-slate-800/30 rounded border border-white/5">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-mono text-slate-500 block mb-1">Host / IP</label>
+                  <Input value={turnHost} onChange={e => setTurnHost(e.target.value)} placeholder="0.0.0.0 or your public IP" className="bg-slate-900 border-white/10 text-slate-100 text-sm h-8" data-testid="turn-host-input" />
+                </div>
+                <div>
+                  <label className="text-xs font-mono text-slate-500 block mb-1">Port</label>
+                  <Input value={turnPort} onChange={e => setTurnPort(e.target.value)} placeholder="3478" className="bg-slate-900 border-white/10 text-slate-100 text-sm h-8" data-testid="turn-port-input" />
+                </div>
+                <div>
+                  <label className="text-xs font-mono text-slate-500 block mb-1">Shared Secret</label>
+                  <Input value={turnSecret} onChange={e => setTurnSecret(e.target.value)} placeholder="your-secret" className="bg-slate-900 border-white/10 text-slate-100 text-sm h-8" data-testid="turn-secret-input" />
+                </div>
+                <div>
+                  <label className="text-xs font-mono text-slate-500 block mb-1">Realm</label>
+                  <Input value={turnRealm} onChange={e => setTurnRealm(e.target.value)} placeholder="shield.local" className="bg-slate-900 border-white/10 text-slate-100 text-sm h-8" data-testid="turn-realm-input" />
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" onClick={handleSaveTurnConfig} className="bg-emerald-500 text-slate-950 hover:bg-emerald-400 h-8 text-xs" data-testid="save-turn-config-btn">Save Config</Button>
+                <Button size="sm" variant="ghost" onClick={() => setEditTurn(false)} className="text-slate-400 h-8 text-xs">Cancel</Button>
+              </div>
+            </div>
+          ) : (
+            <div className="mb-4 p-3 bg-slate-800/30 rounded border border-white/5">
+              <div className="flex items-center justify-between">
+                <div className="text-xs text-slate-400 space-y-1">
+                  <div><span className="text-slate-600 font-mono">Host:</span> {turnConfig?.host || 'Not configured'}</div>
+                  <div><span className="text-slate-600 font-mono">Port:</span> {turnConfig?.port || 3478}</div>
+                  <div><span className="text-slate-600 font-mono">Realm:</span> {turnConfig?.realm || 'N/A'}</div>
+                </div>
+                <button onClick={() => setEditTurn(true)} className="text-slate-500 hover:text-slate-300 transition-colors" data-testid="edit-turn-btn">
+                  <Settings2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Actions */}
+          <div className="flex items-center gap-3">
+            {turnStatus?.container_status !== 'running' ? (
+              <Button onClick={handleStartTurn} disabled={turnLoading} size="sm" className="bg-emerald-500 text-slate-950 hover:bg-emerald-400 h-9" data-testid="start-turn-btn">
+                {turnLoading ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Play className="w-3.5 h-3.5 mr-1.5" />}
+                Start TURN Server
+              </Button>
+            ) : (
+              <Button onClick={handleStopTurn} disabled={turnLoading} size="sm" variant="outline" className="border-red-500/30 text-red-400 hover:bg-red-500/10 h-9" data-testid="stop-turn-btn">
+                {turnLoading ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Square className="w-3.5 h-3.5 mr-1.5" />}
+                Stop TURN Server
+              </Button>
+            )}
+            <Button onClick={loadTurnConfig} size="sm" variant="ghost" className="text-slate-400 h-9" data-testid="refresh-turn-btn">
+              <RefreshCw className="w-3.5 h-3.5" />
+            </Button>
+          </div>
+
+          <p className="text-[10px] text-slate-600 mt-4 font-mono">
+            Requires Docker installed on host. TURN relays encrypted media for clients behind strict NATs.
+            Open UDP ports 3478 and 49152-65535 in your firewall.
+          </p>
+        </div>
 
         {/* Update System */}
         <div className="mb-8 p-6 bg-slate-900/50 border border-white/5 rounded-lg" data-testid="update-panel">
