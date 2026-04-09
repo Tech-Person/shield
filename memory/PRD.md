@@ -1,85 +1,71 @@
 # SecureComm - Privacy-Focused Discord Replacement
 
-## Original Problem Statement
-Build a privacy-focused Discord replacement with E2E encryption, servers, channels, roles, DMs, group DMs, voice/video calls, screen sharing, share drives, admin dashboard, and multi-platform support (web + PWA).
-
 ## Architecture
 - **Backend**: FastAPI (Python) with MongoDB (Motor async driver)
 - **Frontend**: React with Tailwind CSS, Shadcn/UI components
 - **Real-time**: WebSocket (FastAPI native)
 - **Encryption**: AES-256 (Fernet) for messages at rest
 - **Storage**: Emergent Object Storage for file uploads
-- **Auth**: JWT (httpOnly cookies) + 2FA (TOTP/Google Authenticator)
-- **Voice/Video**: WebRTC (P2P with STUN/TURN, quality up to 2160p/60fps)
+- **Auth**: JWT (httpOnly cookies) + 2FA (TOTP) + Passkeys (WebAuthn)
+- **Voice/Video**: WebRTC (P2P with STUN)
+- **GIFs**: GIPHY API (proxied through backend)
+- **PWA**: Service worker + manifest for installable app
 
-## User Personas
-1. **Regular User**: Creates account, joins servers, chats, DMs friends
-2. **Server Admin/Owner**: Creates servers, manages channels/roles/permissions
-3. **System Admin**: Access admin dashboard, monitor stats, manage platform
+## All Implemented Features
 
-## What's Been Implemented
-
-### Stage 1 - Auth & User Foundation (Apr 8, 2026) ✅
-- Registration, login, JWT auth with httpOnly cookies
-- 2FA (TOTP) setup, confirm, verify, disable
-- User profiles with display name, about, avatar
-- Status system with auto-AFK (10 min timeout)
+### Auth & Security
+- Registration, login with JWT httpOnly cookies
+- 2FA (TOTP with QR code)
+- Passkey/WebAuthn registration and authentication
 - Brute force protection (5 attempts = 15min lockout)
+- AES-256 message encryption at rest
 
-### Stage 2 - Social & Messaging (Apr 8, 2026) ✅
-- Friend request/accept/reject/remove/block/unblock
-- DM conversations (1-on-1 and group)
-- Encrypted messages with search capability
-- Real-time message delivery via WebSocket
+### Messaging
+- DMs (1-on-1 and group)
+- Channel messages with slowmode
+- GIF search & inline sending (GIPHY API)
+- Emoji reactions (12 common emojis)
+- Threaded replies
+- Message edit/delete (own messages)
+- File attachments via object storage
+- Encrypted message search
+- Typing indicators via WebSocket
 
-### Stage 3 - Servers & Channels (Apr 8, 2026) ✅
-- Server CRUD with channels and roles
-- Text channels with slowmode enforcement
-- Voice channel stubs (UI ready)
-- Invite system with codes
+### Servers
+- Server CRUD, channels, roles, permissions
+- Text + voice channels
+- Invite codes with expiry/max uses
 - Member kick/ban
-- Server share drive with storage tracking
-- Admin dashboard with stats and charts
+- Share drive with storage limits (5GB user, 25GB server)
+- Role-based permission system
 
-### Stage 4 - Reactions, Threads, Edit/Delete (Apr 9, 2026) ✅
-- Emoji reactions on DM and channel messages (12 common emojis)
-- Threaded replies with thread panel UI
-- Message editing (own messages only)
-- Message deletion (own messages only)
-- File attachments in chat via object storage
-
-### Stage 5 - Voice/Video & Streaming (Apr 9, 2026) ✅
-- WebRTC voice channels with P2P connections
-- Video toggle with quality selector (480p-2160p, 30-60fps)
+### Voice/Video
+- WebRTC voice channels with P2P
+- Video with quality selector (480p-2160p, 30-60fps)
 - Screen sharing via getDisplayMedia
-- Mute/unmute, video on/off controls
-- Join/leave voice channel with participant tracking
-- STUN servers (Google's public STUN)
+- Mute/video/screen share controls
 
-### Stage 6 - Admin & Deployment (Apr 9, 2026) ✅
-- Admin dashboard with 8 stat cards + bar chart
-- Server listing with storage metrics
+### Platform
+- Admin dashboard with stats + charts
+- User status (Online/Away/Busy/Invisible) with auto-AFK
+- Custom status messages with expiration
+- Desktop notifications (browser Notification API)
 - PWA manifest + service worker
-- Update check endpoint (/api/system/update-check)
+- Update check endpoint
 
 ## Prioritized Backlog
+### P0
+- TURN server relay for NAT traversal
+- Debian deployment package skeleton
 
-### P0 (Next)
-- TURN server relay for NAT traversal (currently P2P only)
-- Server relay logging in admin console
-- Typing indicator display in chat
-- Passkey/WebAuthn support
-
-### P1 (Important)
-- Debian deployment package
+### P1
 - Native app skeletons (Electron/Tauri)
 - GitHub-based auto-update polling
 - Channel permission overrides
 - Message pinning
+- Rich text/markdown rendering
 
-### P2 (Enhancement)
-- Rich text/markdown in messages
+### P2
 - User profile popover cards
-- Server discovery / public servers
 - DM calling (voice/video in DMs)
-- Notification system (desktop + push)
+- Push notifications (FCM/APNs)
