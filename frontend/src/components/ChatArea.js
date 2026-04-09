@@ -118,7 +118,7 @@ export default function ChatArea({ channel, conversation, server, user, ws }) {
   };
 
   const handleCustomEmojiSelect = async (emoji) => {
-    const backendUrl = process.env.REACT_APP_BACKEND_URL;
+    const backendUrl = process.env.REACT_APP_BACKEND_URL || window.location.origin;
     const emojiUrl = `${backendUrl}/api/emojis/${emoji.id}/image`;
     const content = emoji.type === 'sticker' ? `[sticker:${emoji.name}](${emojiUrl})` : `[emoji:${emoji.name}](${emojiUrl})`;
     try {

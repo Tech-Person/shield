@@ -66,7 +66,7 @@ export default function ShareDrive({ server }) {
   const handleCopyLink = async (fileId) => {
     try {
       const { data } = await api.get(`/servers/${server.id}/drive/${fileId}/link`);
-      const fullLink = `${process.env.REACT_APP_BACKEND_URL}${data.link}`;
+      const fullLink = `${process.env.REACT_APP_BACKEND_URL || window.location.origin}${data.link}`;
       await navigator.clipboard.writeText(fullLink);
       setCopiedLink(fileId);
       setTimeout(() => setCopiedLink(null), 2000);

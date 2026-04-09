@@ -12,7 +12,8 @@ export function AuthProvider({ children }) {
 
   const connectWebSocket = useCallback((token) => {
     if (wsRef.current) wsRef.current.close();
-    const wsUrl = process.env.REACT_APP_BACKEND_URL.replace(/^http/, 'ws');
+    const wsBase = process.env.REACT_APP_BACKEND_URL || window.location.origin;
+    const wsUrl = wsBase.replace(/^http/, 'ws');
     const ws = new WebSocket(`${wsUrl}/ws/${token}`);
     ws.onopen = () => {
       heartbeatRef.current = setInterval(() => {

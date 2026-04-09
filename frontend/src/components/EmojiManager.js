@@ -67,7 +67,7 @@ export default function EmojiManager({ onSelect, onClose }) {
     if (onSelect) onSelect(emoji);
   };
 
-  const backendUrl = process.env.REACT_APP_BACKEND_URL;
+  const backendUrl = process.env.REACT_APP_BACKEND_URL || window.location.origin;
   const emojiUrl = (id) => `${backendUrl}/api/emojis/${id}/image`;
   const savedIds = new Set(saved.map(e => e.id));
 
