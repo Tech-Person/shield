@@ -98,6 +98,16 @@ def has_permission(member_permissions: int, required: int) -> bool:
         return True
     return (member_permissions & required) == required
 
+def compute_member_permissions(server: dict, member: dict) -> int:
+    """Compute effective permissions for a member by OR-ing all their role permissions."""
+    if server["owner_id"] == member.get("user_id"):
+        return Permissions.ALL
+    perms = 0
+    for role in server.get("roles", []):
+        if role["id"] in member.get("roles", []):
+            perms |= role["permissions"]
+    return perms
+
 # ─── AUTH ROUTES ───
 @api_router.post("/auth/register")
 async def register(data: UserCreate, response: Response):
@@ -793,13 +803,9 @@ async def create_channel(server_id: str, data: ChannelCreate, request: Request):
     member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]}, {"_id": 0})
     if not member:
         raise HTTPException(403, "Not a member")
-    if server["owner_id"] != user["id"]:
-        member_perms = 0
-        for role in server.get("roles", []):
-            if role["id"] in member.get("roles", []):
-                member_perms |= role["permissions"]
-        if not has_permission(member_perms, Permissions.MANAGE_CHANNELS):
-            raise HTTPException(403, "No permission to manage channels")
+    member_perms = compute_member_permissions(server, member)
+    if not has_permission(member_perms, Permissions.MANAGE_CHANNELS):
+        raise HTTPException(403, "No permission to manage channels")
 
     channel_id = str(uuid.uuid4())
     channel = {
@@ -848,7 +854,12 @@ async def send_channel_message(channel_id: str, data: MessageCreate, request: Re
     if not member:
         raise HTTPException(403, "Not a member of this server")
 
-    if channel.get("slowmode_seconds", 0) > 0:
+    server = await db.servers.find_one({"id": channel["server_id"]}, {"_id": 0})
+    member_perms = compute_member_permissions(server, member) if server else 0
+    if not has_permission(member_perms, Permissions.SEND_MESSAGES):
+        raise HTTPException(403, "No permission to send messages")
+
+    if channel.get("slowmode_seconds", 0) > 0 and not has_permission(member_perms, Permissions.BYPASS_SLOWMODE):
         last_msg = await db.channel_messages.find_one(
             {"channel_id": channel_id, "sender_id": user["id"]},
             {"_id": 0}, sort=[("created_at", -1)]
@@ -1395,6 +1406,26 @@ async def update_role(server_id: str, role_id: str, data: RoleUpdate, request: R
         await db.servers.update_one({"id": server_id, "roles.id": role_id}, {"$set": updates})
     return {"message": "Role updated"}
 
+@api_router.delete("/servers/{server_id}/roles/{role_id}")
+async def delete_role(server_id: str, role_id: str, request: Request):
+    user = await get_current_user(request)
+    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    if not server or server["owner_id"] != user["id"]:
+        raise HTTPException(403, "No permission")
+    role = next((r for r in server.get("roles", []) if r["id"] == role_id), None)
+    if not role:
+        raise HTTPException(404, "Role not found")
+    if role["name"] == "@everyone":
+        raise HTTPException(400, "Cannot delete the @everyone role")
+    await db.servers.update_one({"id": server_id}, {"$pull": {"roles": {"id": role_id}}})
+    await db.server_members.update_many({"server_id": server_id}, {"$pull": {"roles": role_id}})
+    return {"message": "Role deleted"}
+
+@api_router.get("/permissions/map")
+async def get_permissions_map(request: Request):
+    await get_current_user(request)
+    return {"permissions": Permissions.PERMISSION_MAP, "default": Permissions.DEFAULT}
+
 @api_router.post("/servers/{server_id}/members/{user_id}/roles/{role_id}")
 async def assign_role(server_id: str, user_id: str, role_id: str, request: Request):
     user = await get_current_user(request)
@@ -1424,8 +1455,14 @@ async def remove_role(server_id: str, user_id: str, role_id: str, request: Reque
 async def kick_member(server_id: str, user_id: str, request: Request):
     user = await get_current_user(request)
     server = await db.servers.find_one({"id": server_id}, {"_id": 0})
-    if not server or server["owner_id"] != user["id"]:
-        raise HTTPException(403, "No permission")
+    if not server:
+        raise HTTPException(404, "Server not found")
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]}, {"_id": 0})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    member_perms = compute_member_permissions(server, member)
+    if not has_permission(member_perms, Permissions.KICK_MEMBERS):
+        raise HTTPException(403, "No permission to kick members")
     if user_id == server["owner_id"]:
         raise HTTPException(400, "Cannot kick the owner")
     await db.server_members.delete_one({"server_id": server_id, "user_id": user_id})
@@ -1436,8 +1473,14 @@ async def kick_member(server_id: str, user_id: str, request: Request):
 async def ban_member(server_id: str, user_id: str, request: Request):
     user = await get_current_user(request)
     server = await db.servers.find_one({"id": server_id}, {"_id": 0})
-    if not server or server["owner_id"] != user["id"]:
-        raise HTTPException(403, "No permission")
+    if not server:
+        raise HTTPException(404, "Server not found")
+    member = await db.server_members.find_one({"server_id": server_id, "user_id": user["id"]}, {"_id": 0})
+    if not member:
+        raise HTTPException(403, "Not a member")
+    member_perms = compute_member_permissions(server, member)
+    if not has_permission(member_perms, Permissions.BAN_MEMBERS):
+        raise HTTPException(403, "No permission to ban members")
     if user_id == server["owner_id"]:
         raise HTTPException(400, "Cannot ban the owner")
     await db.server_members.delete_one({"server_id": server_id, "user_id": user_id})
@@ -1971,6 +2014,26 @@ async def startup():
         logger.warning(f"Storage init failed: {e}")
 
     await db.stats.update_one({"key": "global"}, {"$setOnInsert": {"messages_sent": 0, "total_servers": 0}}, upsert=True)
+
+    # Migrate @everyone roles to new expanded permission defaults
+    old_default = 0b11110000000  # Old DEFAULT was much smaller
+    servers_cursor = db.servers.find({"roles.name": "@everyone"}, {"_id": 0, "id": 1, "roles": 1})
+    async for srv in servers_cursor:
+        for role in srv.get("roles", []):
+            if role["name"] == "@everyone" and role["permissions"] < (1 << 16):
+                await db.servers.update_one(
+                    {"id": srv["id"], "roles.name": "@everyone"},
+                    {"$set": {"roles.$.permissions": Permissions.DEFAULT}}
+                )
+                break
+        # Ensure all members have the @everyone role id
+        everyone_role = next((r for r in srv.get("roles", []) if r["name"] == "@everyone"), None)
+        if everyone_role:
+            await db.server_members.update_many(
+                {"server_id": srv["id"], "roles": {"$nin": [everyone_role["id"]]}},
+                {"$addToSet": {"roles": everyone_role["id"]}}
+            )
+
     logger.info("SecureComm API started successfully")
 
 @app.on_event("shutdown")

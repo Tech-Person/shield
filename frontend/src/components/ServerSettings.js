@@ -7,14 +7,13 @@ import { Button } from '../components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Badge } from '../components/ui/badge';
+import RoleEditor from './RoleEditor';
 
 export default function ServerSettings({ server, onClose, onUpdate }) {
   const [serverName, setServerName] = useState(server?.name || '');
   const [description, setDescription] = useState(server?.description || '');
   const [storageLimit, setStorageLimit] = useState((server?.storage_limit_bytes || 0) / (1024 * 1024 * 1024));
   const [saving, setSaving] = useState(false);
-  const [roleName, setRoleName] = useState('');
-  const [roleColor, setRoleColor] = useState('#10b981');
   const [inviteCode, setInviteCode] = useState('');
   const [requestedGb, setRequestedGb] = useState(50);
   const [requestReason, setRequestReason] = useState('');
@@ -39,15 +38,6 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
       onUpdate();
     } catch {}
     setSaving(false);
-  };
-
-  const handleCreateRole = async () => {
-    if (!roleName.trim()) return;
-    try {
-      await api.post(`/servers/${server.id}/roles`, { name: roleName, color: roleColor, permissions: 0 });
-      setRoleName('');
-      onUpdate();
-    } catch {}
   };
 
   const handleCreateInvite = async () => {
@@ -85,7 +75,7 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-8 max-w-3xl">
+      <div className="flex-1 overflow-y-auto p-8 max-w-4xl">
         <Tabs defaultValue="general">
           <TabsList className="bg-slate-900/50 border border-white/5 mb-6">
             <TabsTrigger value="general" className="data-[state=active]:bg-slate-800 text-slate-400 data-[state=active]:text-slate-100">General</TabsTrigger>
@@ -119,32 +109,7 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
           </TabsContent>
 
           <TabsContent value="roles">
-            <div className="space-y-4">
-              <div className="flex items-end gap-2">
-                <div>
-                  <Label className="text-slate-300 text-sm">Role Name</Label>
-                  <Input value={roleName} onChange={e => setRoleName(e.target.value)} className="bg-slate-900 border-white/10 text-slate-100 mt-1.5" data-testid="role-name-input" />
-                </div>
-                <div>
-                  <Label className="text-slate-300 text-sm">Color</Label>
-                  <Input type="color" value={roleColor} onChange={e => setRoleColor(e.target.value)} className="bg-slate-900 border-white/10 mt-1.5 w-16 h-10 p-1" />
-                </div>
-                <Button onClick={handleCreateRole} className="bg-emerald-500 text-slate-950 hover:bg-emerald-400" data-testid="create-role-btn">
-                  <Plus className="w-4 h-4 mr-1" /> Create
-                </Button>
-              </div>
-              <ScrollArea className="max-h-64">
-                <div className="space-y-1">
-                  {server?.roles?.map(r => (
-                    <div key={r.id} className="flex items-center gap-3 px-3 py-2 bg-slate-900/30 rounded border border-white/5">
-                      <div className="w-3 h-3 rounded-full" style={{ backgroundColor: r.color }} />
-                      <span className="text-sm text-slate-200">{r.name}</span>
-                      <span className="text-xs text-slate-500 font-mono ml-auto">perms: {r.permissions}</span>
-                    </div>
-                  ))}
-                </div>
-              </ScrollArea>
-            </div>
+            <RoleEditor server={server} onUpdate={onUpdate} />
           </TabsContent>
 
           <TabsContent value="members">
