@@ -64,8 +64,9 @@ def create_refresh_token(user_id: str) -> str:
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
-    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
-    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=False, samesite="lax", max_age=604800, path="/")
+    is_https = os.environ.get("FRONTEND_URL", "").startswith("https")
+    response.set_cookie(key="access_token", value=access_token, httponly=True, secure=is_https, samesite="lax", max_age=86400, path="/")
+    response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, secure=is_https, samesite="lax", max_age=604800, path="/")
 
 async def get_current_user(request: Request) -> dict:
     token = request.cookies.get("access_token")
@@ -282,7 +283,8 @@ async def refresh_token(request: Request, response: Response):
         if not user:
             raise HTTPException(401, "User not found")
         access = create_access_token(user["id"], user["username"])
-        response.set_cookie(key="access_token", value=access, httponly=True, secure=False, samesite="lax", max_age=86400, path="/")
+        is_https = os.environ.get("FRONTEND_URL", "").startswith("https")
+        response.set_cookie(key="access_token", value=access, httponly=True, secure=is_https, samesite="lax", max_age=86400, path="/")
         return {"access_token": access}
     except jwt.InvalidTokenError:
         raise HTTPException(401, "Invalid refresh token")
@@ -2378,9 +2380,17 @@ async def shutdown():
 
 app.include_router(api_router)
 
+_frontend_url = os.environ.get('FRONTEND_URL', '')
+_cors_origins = os.environ.get('CORS_ORIGINS', '').split(',')
+_cors_origins = [o.strip() for o in _cors_origins if o.strip()]
+if _frontend_url and _frontend_url not in _cors_origins:
+    _cors_origins.append(_frontend_url)
+if not _cors_origins:
+    _cors_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
