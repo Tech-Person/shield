@@ -259,15 +259,15 @@ if [[ -f requirements.txt ]]; then
     grep -iv "emergentintegrations" requirements.txt > /tmp/shield-requirements.txt
     pip install -r /tmp/shield-requirements.txt || {
         warn "requirements.txt install had errors. Installing core deps manually..."
-        pip install fastapi "uvicorn[standard]" motor pymongo "python-jose[cryptography]" "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles python-dotenv pyotp "qrcode[pil]" bcrypt requests
+        pip install fastapi "uvicorn[standard]" motor pymongo "python-jose[cryptography]" PyJWT "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles python-dotenv pyotp "qrcode[pil]" bcrypt requests
     }
     rm -f /tmp/shield-requirements.txt
 else
-    pip install fastapi "uvicorn[standard]" motor pymongo "python-jose[cryptography]" "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles python-dotenv pyotp "qrcode[pil]" bcrypt requests
+    pip install fastapi "uvicorn[standard]" motor pymongo "python-jose[cryptography]" PyJWT "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles python-dotenv pyotp "qrcode[pil]" bcrypt requests
 fi
 
 # Verify critical packages installed
-python3 -c "import fastapi; import motor; import cryptography; print('All core packages OK')" || err "Critical Python packages missing. Check pip output above."
+python3 -c "import fastapi; import motor; import cryptography; import jwt; print('All core packages OK')" || err "Critical Python packages missing. Check pip output above."
 
 ENCRYPTION_KEY=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())') || err "Failed to generate encryption key."
 deactivate
