@@ -2037,6 +2037,17 @@ async def _run_update(repo_url: str):
 
             if is_git:
                 log("Git repo found. Pulling latest changes...")
+
+                # Backup .env files before git operations
+                env_backups = {}
+                for env_path in [
+                    os.path.join(INSTALL_DIR, "backend", ".env"),
+                    os.path.join(INSTALL_DIR, "frontend", ".env"),
+                ]:
+                    if os.path.exists(env_path):
+                        with open(env_path) as f:
+                            env_backups[env_path] = f.read()
+
                 proc = await asyncio.create_subprocess_exec(
                     "git", "fetch", "--all",
                     cwd=INSTALL_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -2050,13 +2061,18 @@ async def _run_update(repo_url: str):
                 )
                 stdout, stderr = await proc.communicate()
                 if proc.returncode != 0:
-                    # Try master branch
                     proc = await asyncio.create_subprocess_exec(
                         "git", "reset", "--hard", "origin/master",
                         cwd=INSTALL_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
                     )
                     stdout, stderr = await proc.communicate()
                 log(f"git reset: {stdout.decode().strip() or stderr.decode().strip() or 'ok'}")
+
+                # Restore .env files
+                for env_path, content in env_backups.items():
+                    with open(env_path, "w") as f:
+                        f.write(content)
+                    log(f"Restored {env_path}")
             else:
                 log("Not a git repo. Initializing from remote...")
                 # Clone to temp, then move files
