@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import api from '../lib/api';
-import { X, Plus, Trash2, Copy, UserPlus, ShieldCheck, HardDrive } from 'lucide-react';
+import { X, Plus, Trash2, Copy, UserPlus, ShieldCheck, HardDrive, ChevronDown, Check } from 'lucide-react';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Button } from '../components/ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import { ScrollArea } from '../components/ui/scroll-area';
 import { Badge } from '../components/ui/badge';
+import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import RoleEditor from './RoleEditor';
 
 export default function ServerSettings({ server, onClose, onUpdate }) {
@@ -66,6 +67,23 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
     } catch {}
   };
 
+  const handleAssignRole = async (userId, roleId) => {
+    try {
+      await api.post(`/servers/${server.id}/members/${userId}/roles/${roleId}`);
+      onUpdate();
+    } catch {}
+  };
+
+  const handleRemoveRole = async (userId, roleId) => {
+    try {
+      await api.delete(`/servers/${server.id}/members/${userId}/roles/${roleId}`);
+      onUpdate();
+    } catch {}
+  };
+
+  const allRoles = server?.roles || [];
+  const customRoles = allRoles.filter(r => r.name !== '@everyone');
+
   return (
     <div className="flex-1 flex flex-col bg-[#020617]" data-testid="server-settings">
       <div className="h-12 px-6 flex items-center justify-between border-b border-white/5 flex-shrink-0">
@@ -113,26 +131,75 @@ export default function ServerSettings({ server, onClose, onUpdate }) {
           </TabsContent>
 
           <TabsContent value="members">
-            <ScrollArea className="max-h-96">
-              <div className="space-y-1">
-                {server?.members?.map(m => (
-                  <div key={m.id} className="flex items-center justify-between px-3 py-2 bg-slate-900/30 rounded border border-white/5" data-testid={`settings-member-${m.user_id}`}>
-                    <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-slate-800 flex items-center justify-center text-xs text-slate-300">
-                        {m.display_name?.slice(0, 2).toUpperCase()}
+            <ScrollArea className="max-h-[500px]">
+              <div className="space-y-2">
+                {server?.members?.map(m => {
+                  const memberRoleIds = m.roles || [];
+                  const everyoneRole = allRoles.find(r => r.name === '@everyone');
+                  const assignedCustom = customRoles.filter(r => memberRoleIds.includes(r.id));
+                  const unassigned = customRoles.filter(r => !memberRoleIds.includes(r.id));
+
+                  return (
+                    <div key={m.id} className="px-4 py-3 bg-slate-900/30 rounded border border-white/5" data-testid={`settings-member-${m.user_id}`}>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-9 h-9 rounded-full bg-slate-800 flex items-center justify-center text-xs font-medium text-slate-300">
+                            {m.display_name?.slice(0, 2).toUpperCase()}
+                          </div>
+                          <div>
+                            <p className="text-sm text-slate-200 font-medium">{m.display_name || m.username}</p>
+                            <p className="text-xs text-slate-500">{m.is_owner ? 'Owner' : 'Member'}</p>
+                          </div>
+                        </div>
+                        {!m.is_owner && (
+                          <button onClick={() => handleKick(m.user_id)} className="p-2 text-slate-500 hover:text-red-400 rounded transition-colors" data-testid={`kick-member-${m.user_id}`}>
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
-                      <div>
-                        <p className="text-sm text-slate-200">{m.display_name || m.username}</p>
-                        <p className="text-xs text-slate-500">{m.is_owner ? 'Owner' : 'Member'}</p>
+                      {/* Role badges and assignment */}
+                      <div className="flex items-center flex-wrap gap-1.5 mt-2.5 ml-12">
+                        {everyoneRole && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-slate-800 text-slate-400 border border-white/5">
+                            @everyone
+                          </span>
+                        )}
+                        {assignedCustom.map(r => (
+                          <span key={r.id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border" style={{ backgroundColor: r.color + '20', borderColor: r.color + '40', color: r.color }} data-testid={`member-role-badge-${m.user_id}-${r.id}`}>
+                            <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: r.color }} />
+                            {r.name}
+                            <button onClick={() => handleRemoveRole(m.user_id, r.id)} className="ml-0.5 opacity-60 hover:opacity-100" data-testid={`remove-role-${m.user_id}-${r.id}`}>
+                              <X className="w-3 h-3" />
+                            </button>
+                          </span>
+                        ))}
+                        {unassigned.length > 0 && (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-slate-800/50 text-slate-500 hover:text-slate-300 hover:bg-slate-700 border border-dashed border-white/10 transition-colors" data-testid={`add-role-btn-${m.user_id}`}>
+                                <Plus className="w-3 h-3" /> Add Role
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent align="start" className="bg-slate-900 border-white/10 w-48 p-1.5" data-testid={`role-popover-${m.user_id}`}>
+                              <p className="text-[10px] font-mono uppercase tracking-widest text-slate-600 px-2 py-1">Assign Role</p>
+                              {unassigned.map(r => (
+                                <button
+                                  key={r.id}
+                                  onClick={() => handleAssignRole(m.user_id, r.id)}
+                                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm text-slate-300 hover:bg-slate-800 transition-colors"
+                                  data-testid={`assign-role-${m.user_id}-${r.id}`}
+                                >
+                                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: r.color }} />
+                                  {r.name}
+                                </button>
+                              ))}
+                            </PopoverContent>
+                          </Popover>
+                        )}
                       </div>
                     </div>
-                    {!m.is_owner && (
-                      <button onClick={() => handleKick(m.user_id)} className="p-2 text-slate-400 hover:text-red-400 rounded" data-testid={`kick-member-${m.user_id}`}>
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </ScrollArea>
           </TabsContent>
