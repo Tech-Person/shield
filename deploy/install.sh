@@ -206,12 +206,18 @@ source venv/bin/activate
 pip install --quiet --upgrade pip
 
 if [[ -f requirements.txt ]]; then
-    pip install --quiet -r requirements.txt
+    # Filter out emergentintegrations (Emergent platform-only package, not on public PyPI)
+    grep -iv "emergentintegrations" requirements.txt > /tmp/shield-requirements.txt
+    pip install --quiet -r /tmp/shield-requirements.txt || {
+        warn "Some packages failed. Installing core dependencies manually..."
+        pip install --quiet fastapi uvicorn motor pymongo "python-jose[cryptography]" "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles
+    }
+    rm -f /tmp/shield-requirements.txt
 else
-    pip install --quiet fastapi uvicorn motor pymongo python-jose[cryptography] passlib[bcrypt] python-multipart pydantic cryptography httpx websockets aiofiles
+    pip install --quiet fastapi uvicorn motor pymongo "python-jose[cryptography]" "passlib[bcrypt]" python-multipart pydantic cryptography httpx websockets aiofiles
 fi
 
-ENCRYPTION_KEY=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')
+ENCRYPTION_KEY=$(python3 -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())') || err "Failed to generate encryption key. Is cryptography installed?"
 deactivate
 
 cat > "${INSTALL_DIR}/backend/.env" <<ENVEOF
