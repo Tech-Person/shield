@@ -2130,7 +2130,7 @@ async def get_turn_credentials(request: Request):
     host = turn_config.get("host", "127.0.0.1")
     port = turn_config.get("port", 3478)
     secret = turn_config.get("shared_secret", "")
-    ttl = 86400  # 24h
+    ttl = 21600  # 6h credential lifetime
     timestamp = int(_time.time()) + ttl
     username = f"{timestamp}:{user['id']}"
     h = hmac.new(secret.encode(), username.encode(), hashlib.sha1)
@@ -2183,7 +2183,20 @@ async def start_turn_server(request: Request):
              f"--realm={realm}", "--use-auth-secret", f"--static-auth-secret={secret}",
              "--no-cli", "--no-tls", "--no-dtls",
              "--fingerprint", "--lt-cred-mech",
-             "--min-port=49152", "--max-port=65535"],
+             "--min-port=49152", "--max-port=65535",
+             # Security hardening
+             "--no-multicast-peers",              # Block multicast relay
+             "--denied-peer-ip=10.0.0.0-10.255.255.255",    # Block internal ranges
+             "--denied-peer-ip=172.16.0.0-172.31.255.255",
+             "--denied-peer-ip=192.168.0.0-192.168.255.255",
+             "--denied-peer-ip=127.0.0.0-127.255.255.255",
+             "--denied-peer-ip=0.0.0.0-0.255.255.255",
+             "--denied-peer-ip=::1",
+             "--stale-nonce=600",                 # Nonce expires after 10 min
+             "--max-bps=1500000",                 # 1.5 Mbps per session cap
+             "--total-quota=100",                 # Max 100 concurrent sessions
+             "--user-quota=10",                   # Max 10 sessions per user
+             "--no-tcp-relay"],                   # UDP relay only (reduces TCP abuse surface)
             capture_output=True, text=True, timeout=30
         )
         if result.returncode != 0:
