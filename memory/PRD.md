@@ -13,8 +13,9 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
 - Auth: JWT + WebAuthn Passkeys + 2FA
 - Encryption: RSA-OAEP 2048 + AES-256-GCM
 - Voice/Video: WebRTC mesh + coturn TURN relay
+- Native: Electron (Linux desktop wrapper)
 
-### Backend Architecture (Refactored)
+### Backend Architecture
 ```
 /app/backend/
   server.py          # Slim orchestrator (~220 lines): WebSocket, startup, CORS, router mounting
@@ -31,10 +32,6 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
     files.py         # Files: upload, download, share drive, text files
     emojis.py        # Emojis: upload, save, delete
     admin.py         # Admin: stats, TURN, storage requests, updates
-  websocket_manager.py
-  models.py
-  encryption.py
-  storage_utils.py
 ```
 
 ### What's Implemented
@@ -63,18 +60,27 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
 - [x] Voice connect/disconnect toasts
 - [x] Ping/latency display
 
-#### Refactoring (Complete - 2026-04-10)
-- [x] Backend modular routers: Split server.py from 2976 -> 220 lines
-- [x] 11 route modules under /app/backend/routes/
+#### Backend Refactoring (Complete - 2026-04-10)
+- [x] Split server.py from 2976 -> 220 lines (11 route modules)
 - [x] Shared deps in deps.py (db, auth, permissions)
 - [x] Fixed MongoDB read_receipts partial indexes
 - [x] All 35/35 API tests passed post-refactor
 
-#### P1 Features (Pending)
-- [ ] DM ringing (audio + visual incoming call alerts)
+#### DM Ringing (Complete - 2026-04-10)
+- [x] Audio ringtone for incoming calls (two-tone 440/480Hz loop via Web Audio API)
+- [x] Dialtone for outgoing calls (425Hz loop)
+- [x] Pulsating ring animation on incoming call overlay
+- [x] 30-second auto-timeout with countdown display
+- [x] Browser notifications for calls when tab not focused
+- [x] Enhanced visual UI for call states (incoming/outgoing/active)
+
+#### Native Linux App Skeleton (Complete - 2026-04-10)
+- [x] Electron wrapper at /app/native/linux/
+- [x] System tray integration (minimize to tray)
+- [x] Single instance lock
+- [x] WebRTC permissions auto-granted
+- [x] Build scripts for AppImage and .deb
+- [x] External links open in default browser
 
 #### P2 Features (Pending)
 - [ ] Self-destructing status messages
-
-#### P3 Features (Pending)
-- [ ] Native app skeletons (Linux)
