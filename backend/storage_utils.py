@@ -16,9 +16,9 @@ def init_storage():
     global storage_key, use_local
     if storage_key:
         return storage_key
-    emergent_key = os.environ.get("EMERGENT_LLM_KEY")
+    emergent_key = os.environ.get("STORAGE_API_KEY") or os.environ.get("EMERGENT_LLM_KEY")
     if not emergent_key:
-        logger.info("EMERGENT_LLM_KEY not set — using local file storage at %s", LOCAL_STORAGE_DIR)
+        logger.info("Using local file storage at %s", LOCAL_STORAGE_DIR)
         use_local = True
         os.makedirs(LOCAL_STORAGE_DIR, exist_ok=True)
         return "local"
