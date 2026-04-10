@@ -13,6 +13,9 @@ export function useVoiceManager(user, ws) {
   const [videoOn, setVideoOn] = useState(false);
   const [screenSharing, setScreenSharing] = useState(false);
   const [speaking, setSpeaking] = useState(false);
+  const [speakingUsers, setSpeakingUsers] = useState({}); // userId -> boolean
+  const [voiceEvents, setVoiceEvents] = useState([]); // [{ id, type, name, ts }]
+  const [ping, setPing] = useState(null); // ms
 
   const localStreamRef = useRef(null);
   const screenStreamRef = useRef(null);
@@ -21,7 +24,9 @@ export function useVoiceManager(user, ws) {
   const iceServersRef = useRef(null);
   const audioDetectorCleanupRef = useRef(null);
   const remoteAudioRefs = useRef({}); // userId -> HTMLAudioElement
+  const remoteSpeakingCleanupsRef = useRef({}); // userId -> cleanup fn
   const participantPollRef = useRef(null);
+  const pingIntervalRef = useRef(null);
   const [remoteStreamVersion, setRemoteStreamVersion] = useState(0);
 
   // Fetch TURN/STUN credentials
@@ -53,6 +58,55 @@ export function useVoiceManager(user, ws) {
     }
   }, [joined, channelInfo?.id, loadParticipants]);
 
+  // Ping measurement from WebRTC stats
+  useEffect(() => {
+    if (!joined) {
+      setPing(null);
+      return;
+    }
+    const measure = async () => {
+      const pcs = Object.values(peerConnectionsRef.current);
+      if (pcs.length === 0) { setPing(null); return; }
+      try {
+        const pc = pcs[0];
+        if (pc.connectionState === 'closed') return;
+        const stats = await pc.getStats();
+        stats.forEach(report => {
+          if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.currentRoundTripTime != null) {
+            setPing(Math.round(report.currentRoundTripTime * 1000));
+          }
+        });
+      } catch {}
+    };
+    measure();
+    pingIntervalRef.current = setInterval(measure, 3000);
+    return () => clearInterval(pingIntervalRef.current);
+  }, [joined]);
+
+  // Auto-expire voice events after 4 seconds
+  useEffect(() => {
+    if (voiceEvents.length === 0) return;
+    const timer = setTimeout(() => {
+      setVoiceEvents(prev => prev.filter(e => Date.now() - e.ts < 4000));
+    }, 4100);
+    return () => clearTimeout(timer);
+  }, [voiceEvents]);
+
+  // Start remote speaking detection for a user's stream
+  const startRemoteSpeakingDetection = useCallback((userId, stream) => {
+    // Clean up any existing detector for this user
+    if (remoteSpeakingCleanupsRef.current[userId]) {
+      remoteSpeakingCleanupsRef.current[userId]();
+    }
+    const cleanup = createAudioLevelDetector(stream, (isSpeaking) => {
+      setSpeakingUsers(prev => {
+        if (prev[userId] === isSpeaking) return prev;
+        return { ...prev, [userId]: isSpeaking };
+      });
+    });
+    remoteSpeakingCleanupsRef.current[userId] = cleanup;
+  }, []);
+
   // Play remote audio from persistent elements (survives navigation)
   const playRemoteStream = useCallback((userId, stream) => {
     remoteStreamsRef.current[userId] = stream;
@@ -67,7 +121,9 @@ export function useVoiceManager(user, ws) {
     audioEl.srcObject = stream;
     audioEl.muted = deafened;
     audioEl.play().catch(() => {});
-  }, [deafened]);
+    // Start speaking detection for this remote user
+    startRemoteSpeakingDetection(userId, stream);
+  }, [deafened, startRemoteSpeakingDetection]);
 
   // Update deafen state on all remote audio
   useEffect(() => {
@@ -164,8 +220,16 @@ export function useVoiceManager(user, ws) {
         const data = JSON.parse(event.data);
         if (data.type === 'voice_state_update' && data.channel_id === channelInfo?.id) {
           loadParticipants();
-          if (data.user_joined && data.user_joined !== user?.id && joined) playJoinSound();
-          if (data.user_left && data.user_left !== user?.id && joined) playLeaveSound();
+          if (data.user_joined && data.user_joined !== user?.id && joined) {
+            playJoinSound();
+            const name = data.user_joined_name || 'Someone';
+            setVoiceEvents(prev => [...prev, { id: Date.now(), type: 'join', name, ts: Date.now() }]);
+          }
+          if (data.user_left && data.user_left !== user?.id && joined) {
+            playLeaveSound();
+            const name = data.user_left_name || 'Someone';
+            setVoiceEvents(prev => [...prev, { id: Date.now() + 1, type: 'leave', name, ts: Date.now() }]);
+          }
           if (data.user_left) {
             const leftId = data.user_left;
             const pc = peerConnectionsRef.current[leftId];
@@ -173,6 +237,16 @@ export function useVoiceManager(user, ws) {
             const audioEl = remoteAudioRefs.current[leftId];
             if (audioEl) { audioEl.srcObject = null; delete remoteAudioRefs.current[leftId]; }
             delete remoteStreamsRef.current[leftId];
+            // Clean up remote speaking detector
+            if (remoteSpeakingCleanupsRef.current[leftId]) {
+              remoteSpeakingCleanupsRef.current[leftId]();
+              delete remoteSpeakingCleanupsRef.current[leftId];
+            }
+            setSpeakingUsers(prev => {
+              const next = { ...prev };
+              delete next[leftId];
+              return next;
+            });
           }
         }
         if (data.type === 'webrtc_signal' && joined) {
@@ -246,6 +320,10 @@ export function useVoiceManager(user, ws) {
     Object.values(remoteAudioRefs.current).forEach(el => { el.srcObject = null; });
     remoteAudioRefs.current = {};
     remoteStreamsRef.current = {};
+    // Clean up all remote speaking detectors
+    Object.values(remoteSpeakingCleanupsRef.current).forEach(fn => fn());
+    remoteSpeakingCleanupsRef.current = {};
+    setSpeakingUsers({});
     localStreamRef.current = null;
     screenStreamRef.current = null;
     if (audioDetectorCleanupRef.current) audioDetectorCleanupRef.current();
@@ -258,6 +336,8 @@ export function useVoiceManager(user, ws) {
     setScreenSharing(false);
     setChannelInfo(null);
     setParticipants([]);
+    setVoiceEvents([]);
+    setPing(null);
     playLeaveSound();
   }, [ws, channelInfo?.id]);
 
@@ -326,6 +406,9 @@ export function useVoiceManager(user, ws) {
     videoOn,
     screenSharing,
     speaking,
+    speakingUsers,
+    voiceEvents,
+    ping,
     localStreamRef,
     screenStreamRef,
     remoteStreamsRef,

@@ -2801,20 +2801,26 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             elif msg_type == "join_voice":
                 manager.join_voice(user_id, data["channel_id"])
                 participants = list(manager.get_voice_participants(data["channel_id"]))
+                u_doc = await db.users.find_one({"id": user_id}, {"_id": 0, "username": 1, "display_name": 1})
+                joined_name = (u_doc or {}).get("display_name") or (u_doc or {}).get("username", "Unknown")
                 await manager.broadcast_channel(data["channel_id"], {
                     "type": "voice_state_update",
                     "channel_id": data["channel_id"],
                     "participants": participants,
-                    "user_joined": user_id
+                    "user_joined": user_id,
+                    "user_joined_name": joined_name
                 })
             elif msg_type == "leave_voice":
+                u_doc2 = await db.users.find_one({"id": user_id}, {"_id": 0, "username": 1, "display_name": 1})
+                left_name = (u_doc2 or {}).get("display_name") or (u_doc2 or {}).get("username", "Unknown")
                 manager.leave_voice(user_id, data["channel_id"])
                 participants = list(manager.get_voice_participants(data["channel_id"]))
                 await manager.broadcast_channel(data["channel_id"], {
                     "type": "voice_state_update",
                     "channel_id": data["channel_id"],
                     "participants": participants,
-                    "user_left": user_id
+                    "user_left": user_id,
+                    "user_left_name": left_name
                 })
             elif msg_type == "webrtc_signal":
                 await manager.send_personal(data["target_user_id"], {

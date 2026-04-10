@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import api from '../lib/api';
-import { Mic, MicOff, Video, VideoOff, Monitor, PhoneOff, Settings, Volume2, VolumeX } from 'lucide-react';
+import { Mic, MicOff, Video, VideoOff, Monitor, PhoneOff, Settings, Volume2, VolumeX, LogIn, LogOut, Wifi } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
 
@@ -19,6 +19,9 @@ export default function VoiceChannel({ channel, server, user, voiceManager }) {
     videoOn,
     screenSharing,
     speaking,
+    speakingUsers,
+    voiceEvents,
+    ping,
     localStreamRef,
     screenStreamRef,
     remoteStreamsRef,
@@ -88,6 +91,13 @@ export default function VoiceChannel({ channel, server, user, voiceManager }) {
     joinChannel(channel, server?.id);
   };
 
+  const getPingColor = (ms) => {
+    if (ms == null) return 'text-slate-500';
+    if (ms < 80) return 'text-emerald-400';
+    if (ms < 150) return 'text-amber-400';
+    return 'text-red-400';
+  };
+
   return (
     <div className="flex-1 flex flex-col bg-[#020617]" data-testid="voice-channel">
       {/* Header */}
@@ -126,7 +136,26 @@ export default function VoiceChannel({ channel, server, user, voiceManager }) {
       )}
 
       {/* Video grid / participants */}
-      <div className="flex-1 p-4">
+      <div className="flex-1 p-4 relative">
+        {/* Voice events feed (join/leave toasts) */}
+        {isActiveVoice && voiceEvents.length > 0 && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10 flex flex-col gap-1.5" data-testid="voice-events-feed">
+            {voiceEvents.map(evt => (
+              <div
+                key={evt.id}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-['IBM_Plex_Sans'] backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-300 ${
+                  evt.type === 'join'
+                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
+                    : 'bg-red-500/15 text-red-400 border border-red-500/20'
+                }`}
+              >
+                {evt.type === 'join' ? <LogIn className="w-3 h-3" /> : <LogOut className="w-3 h-3" />}
+                <span><strong>{evt.name}</strong> {evt.type === 'join' ? 'joined' : 'left'} the channel</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {!isActiveVoice ? (
           <div className="flex flex-col items-center justify-center h-full gap-6">
             <div className="text-center">
@@ -159,7 +188,7 @@ export default function VoiceChannel({ channel, server, user, voiceManager }) {
             {/* Video grid */}
             <div className="flex-1 grid grid-cols-2 lg:grid-cols-3 gap-3 mb-4">
               {/* Local video */}
-              <div className={`relative bg-slate-900/50 rounded-lg border aspect-video flex items-center justify-center overflow-hidden transition-all duration-200 ${speaking ? 'border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.3)]' : 'border-white/5'}`}>
+              <div className={`relative bg-slate-900/50 rounded-lg border-2 aspect-video flex items-center justify-center overflow-hidden transition-all duration-200 ${speaking ? 'border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.3)]' : 'border-white/5'}`}>
                 {videoOn || screenSharing ? (
                   <video ref={localVideoRef} autoPlay muted playsInline className="w-full h-full object-cover" data-testid="local-video" />
                 ) : (
@@ -174,21 +203,40 @@ export default function VoiceChannel({ channel, server, user, voiceManager }) {
                 {screenSharing && <div className="absolute top-2 left-2 px-2 py-0.5 bg-emerald-500/20 rounded text-[10px] text-emerald-400 font-mono">SHARING</div>}
               </div>
               {/* Remote participants */}
-              {participants.filter(p => p.id !== user?.id).map(p => (
-                <div key={p.id} className="relative bg-slate-900/50 rounded-lg border border-white/5 aspect-video flex items-center justify-center overflow-hidden" data-testid={`participant-${p.id}`}>
-                  <video id={`remote-video-${p.id}`} autoPlay playsInline className="w-full h-full object-cover absolute inset-0 hidden" />
-                  <div className="flex flex-col items-center gap-2">
-                    <div className="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center text-xl text-slate-300">
-                      {p.username?.slice(0, 2).toUpperCase()}
+              {participants.filter(p => p.id !== user?.id).map(p => {
+                const isRemoteSpeaking = speakingUsers[p.id];
+                return (
+                  <div
+                    key={p.id}
+                    className={`relative bg-slate-900/50 rounded-lg border-2 aspect-video flex items-center justify-center overflow-hidden transition-all duration-200 ${
+                      isRemoteSpeaking ? 'border-emerald-500 shadow-[0_0_12px_rgba(16,185,129,0.3)]' : 'border-white/5'
+                    }`}
+                    data-testid={`participant-${p.id}`}
+                  >
+                    <video id={`remote-video-${p.id}`} autoPlay playsInline className="w-full h-full object-cover absolute inset-0 hidden" />
+                    <div className="flex flex-col items-center gap-2">
+                      <div className={`w-16 h-16 rounded-full flex items-center justify-center text-xl transition-colors duration-200 ${
+                        isRemoteSpeaking ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-800 text-slate-300'
+                      }`}>
+                        {p.username?.slice(0, 2).toUpperCase()}
+                      </div>
+                      <span className="text-xs text-slate-500">{p.display_name || p.username}</span>
                     </div>
-                    <span className="text-xs text-slate-500">{p.display_name || p.username}</span>
                   </div>
-                </div>
-              ))}
+                );
+              })}
+            </div>
+
+            {/* Ping display */}
+            <div className="flex items-center justify-center gap-1.5 pb-1" data-testid="ping-display">
+              <Wifi className={`w-3 h-3 ${getPingColor(ping)}`} />
+              <span className={`text-xs font-mono ${getPingColor(ping)}`}>
+                {ping != null ? `${ping} ms` : 'Measuring...'}
+              </span>
             </div>
 
             {/* Controls */}
-            <div className="flex items-center justify-center gap-3 py-4">
+            <div className="flex items-center justify-center gap-3 py-3">
               <button onClick={toggleMute} className={`p-3 rounded-full transition-colors ${muted ? 'bg-red-500/20 text-red-400 hover:bg-red-500/30' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'}`} data-testid="toggle-mute-btn">
                 {muted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
               </button>

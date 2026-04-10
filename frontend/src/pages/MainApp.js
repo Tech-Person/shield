@@ -141,6 +141,7 @@ export default function MainApp() {
     setActiveChannel(null);
     setShowDrive(false);
     setShowServerSettings(false);
+    setShowSettings(null);
     setMobileMenuOpen(false);
   };
 
@@ -151,6 +152,7 @@ export default function MainApp() {
     setActiveView('dms');
     setShowDrive(false);
     setShowServerSettings(false);
+    setShowSettings(null);
     setMobileMenuOpen(false);
   };
 
@@ -162,6 +164,7 @@ export default function MainApp() {
     setActiveView('friends');
     setShowDrive(false);
     setShowServerSettings(false);
+    setShowSettings(null);
     setMobileMenuOpen(false);
   };
 
@@ -169,6 +172,7 @@ export default function MainApp() {
     setActiveConversation(conv);
     setActiveView('dms');
     setShowServerSettings(false);
+    setShowSettings(null);
     setMobileMenuOpen(false);
   };
 
@@ -176,6 +180,7 @@ export default function MainApp() {
     setActiveChannel(channel);
     setShowDrive(false);
     setShowServerSettings(false);
+    setShowSettings(null);
     setChannelSettings(null);
     setMobileMenuOpen(false);
   };
