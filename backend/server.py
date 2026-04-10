@@ -129,9 +129,17 @@ async def startup():
     await db.drive_files.create_index("server_id")
     await db.login_attempts.create_index("identifier")
     await db.login_attempts.delete_many({})
-    # Use partial indexes for read_receipts to handle null values correctly
-    await db.read_receipts.create_index([("channel_id", 1), ("user_id", 1)], unique=True, partialFilterExpression={"channel_id": {"$type": "string"}})
-    await db.read_receipts.create_index([("conversation_id", 1), ("user_id", 1)], unique=True, partialFilterExpression={"conversation_id": {"$type": "string"}})
+    # Safely recreate read_receipts indexes (drop old conflicting ones first)
+    try:
+        await db.read_receipts.drop_index("channel_id_1_user_id_1")
+    except Exception:
+        pass
+    try:
+        await db.read_receipts.drop_index("conversation_id_1_user_id_1")
+    except Exception:
+        pass
+    await db.read_receipts.create_index([("channel_id", 1), ("user_id", 1)], unique=True, partialFilterExpression={"channel_id": {"$type": "string"}}, name="channel_id_1_user_id_1")
+    await db.read_receipts.create_index([("conversation_id", 1), ("user_id", 1)], unique=True, partialFilterExpression={"conversation_id": {"$type": "string"}}, name="conversation_id_1_user_id_1")
     await db.reactions.create_index("message_id")
     await db.reactions.create_index([("message_id", 1), ("emoji", 1), ("user_id", 1)], unique=True)
     await db.thread_replies.create_index("parent_message_id")
