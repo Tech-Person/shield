@@ -98,3 +98,4 @@ frontend/node_modules/.cache/default-development/5.pack
 frontend/node_modules/.cache/default-development/11.pack
 frontend/node_modules/.cache/default-development/8.pack
 frontend/node_modules/.cache/default-development/10.pack
+native/linux/node_modules/electron/dist/electron

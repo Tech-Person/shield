@@ -40,6 +40,103 @@ export function playLeaveSound() {
   } catch {}
 }
 
+// ─── CALL RINGING (looping) ───
+let activeRingtone = null;
+
+export function playRingtone() {
+  stopRingtone();
+  try {
+    const ctx = getAudioCtx();
+    const gainNode = ctx.createGain();
+    gainNode.connect(ctx.destination);
+    gainNode.gain.setValueAtTime(0.18, ctx.currentTime);
+
+    let stopped = false;
+    const playBurst = (startTime) => {
+      if (stopped) return;
+      // Two-tone ring: 440Hz then 480Hz, classic phone ring
+      for (let i = 0; i < 2; i++) {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = i === 0 ? 440 : 480;
+        osc.connect(gainNode);
+        osc.start(startTime);
+        osc.stop(startTime + 0.8);
+      }
+    };
+
+    // Ring pattern: 0.8s ring, 1.2s pause, repeat
+    const interval = setInterval(() => {
+      if (stopped) return;
+      playBurst(ctx.currentTime);
+    }, 2000);
+
+    playBurst(ctx.currentTime);
+
+    activeRingtone = {
+      stop: () => {
+        stopped = true;
+        clearInterval(interval);
+        gainNode.disconnect();
+        activeRingtone = null;
+      }
+    };
+  } catch {}
+}
+
+export function stopRingtone() {
+  if (activeRingtone) {
+    activeRingtone.stop();
+    activeRingtone = null;
+  }
+}
+
+let activeDialtone = null;
+
+export function playDialtone() {
+  stopDialtone();
+  try {
+    const ctx = getAudioCtx();
+    const gainNode = ctx.createGain();
+    gainNode.connect(ctx.destination);
+    gainNode.gain.setValueAtTime(0.08, ctx.currentTime);
+
+    let stopped = false;
+    const playBeep = (startTime) => {
+      if (stopped) return;
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = 425;
+      osc.connect(gainNode);
+      osc.start(startTime);
+      osc.stop(startTime + 0.4);
+    };
+
+    const interval = setInterval(() => {
+      if (stopped) return;
+      playBeep(ctx.currentTime);
+    }, 3000);
+
+    playBeep(ctx.currentTime);
+
+    activeDialtone = {
+      stop: () => {
+        stopped = true;
+        clearInterval(interval);
+        gainNode.disconnect();
+        activeDialtone = null;
+      }
+    };
+  } catch {}
+}
+
+export function stopDialtone() {
+  if (activeDialtone) {
+    activeDialtone.stop();
+    activeDialtone = null;
+  }
+}
+
 // Audio level detection for speaking indicator
 export function createAudioLevelDetector(stream, onLevel) {
   try {

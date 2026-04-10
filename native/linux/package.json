@@ -1,0 +1,48 @@
+{
+  "name": "shield-desktop",
+  "version": "1.0.0",
+  "description": "Shield - Privacy-First Communication (Desktop)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --linux",
+    "build:deb": "electron-builder --linux deb",
+    "build:appimage": "electron-builder --linux AppImage",
+    "build:rpm": "electron-builder --linux rpm"
+  },
+  "build": {
+    "appId": "com.shield.desktop",
+    "productName": "Shield",
+    "directories": {
+      "output": "dist"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "assets/icon.png",
+      "category": "Network;Chat;InstantMessaging",
+      "desktop": {
+        "Name": "Shield",
+        "Comment": "Privacy-First Communication",
+        "Keywords": "chat;messaging;voice;video;encrypted;privacy",
+        "StartupWMClass": "shield-desktop"
+      }
+    },
+    "deb": {
+      "depends": [
+        "libnotify4",
+        "libxtst6",
+        "libnss3"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.0"
+  }
+}
