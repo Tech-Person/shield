@@ -7,12 +7,35 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
 
 ### Architecture
 - Frontend: React (Shadcn UI), port 3000
-- Backend: FastAPI, port 8001
+- Backend: FastAPI (modular routers), port 8001
 - Database: MongoDB
 - Real-time: WebSockets (multi-connection per user)
 - Auth: JWT + WebAuthn Passkeys + 2FA
 - Encryption: RSA-OAEP 2048 + AES-256-GCM
 - Voice/Video: WebRTC mesh + coturn TURN relay
+
+### Backend Architecture (Refactored)
+```
+/app/backend/
+  server.py          # Slim orchestrator (~220 lines): WebSocket, startup, CORS, router mounting
+  deps.py            # Shared dependencies: db, auth helpers, permissions
+  routes/
+    auth.py          # Auth: register, login, 2FA, passkeys, logout, refresh
+    users.py         # Users: profile, status, search
+    friends.py       # Friends: request, accept, reject, block, unblock
+    keys.py          # E2E keys: device register, backup, bundle
+    dm.py            # DMs: create, messages, calls, threads, reactions, read receipts
+    servers.py       # Servers: CRUD, invites, join
+    channels.py      # Channels: CRUD, messages, voice, GIFs, read receipts, system update-check
+    roles.py         # Roles: CRUD, assign, kick, ban
+    files.py         # Files: upload, download, share drive, text files
+    emojis.py        # Emojis: upload, save, delete
+    admin.py         # Admin: stats, TURN, storage requests, updates
+  websocket_manager.py
+  models.py
+  encryption.py
+  storage_utils.py
+```
 
 ### What's Implemented
 
@@ -35,39 +58,23 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
 - [x] Channel settings per channel (name, topic, slowmode, delete)
 - [x] Copy invite link with feedback
 - [x] Voice join/leave sounds, speaking indicator
+- [x] Global voice persistence (VoiceFloat widget)
+- [x] Remote speaking visual indicators
+- [x] Voice connect/disconnect toasts
+- [x] Ping/latency display
 
-#### Bug Fixes (2026-04-09, Batch 1)
-- [x] Fixed double message receives in DMs
-- [x] Fixed file uploads showing [File:Filename] text
-- [x] Fixed status message save, server settings not closing
-- [x] Fixed display name sync, new DM not appearing
-- [x] Added persistent voice across navigation
+#### Refactoring (Complete - 2026-04-10)
+- [x] Backend modular routers: Split server.py from 2976 -> 220 lines
+- [x] 11 route modules under /app/backend/routes/
+- [x] Shared deps in deps.py (db, auth, permissions)
+- [x] Fixed MongoDB read_receipts partial indexes
+- [x] All 35/35 API tests passed post-refactor
 
-#### Bug Fixes (2026-04-09, Batch 2)
-- [x] **Fixed WebSocket manager** - Now supports multiple connections per user (multi-tab), send_personal only removes dead individual connections instead of nuking the entire user
-- [x] **Fixed status makes all users offline** - Status broadcasts directly to server members (not per-channel spam), MainApp updates member status locally without full refetch
-- [x] **Fixed messages not updating live** - Removed duplicate broadcast_dm, fixed orphaned decorator on DM messages endpoint
-- [x] **Fixed voice not updating live** - VoiceChannel now subscribes to channel on mount; join_voice auto-subscribes in backend
-- [x] **Fixed voice showing users alone** - Same subscription fix enables voice_state_update to reach all participants
-
-#### Voice Persistence Fix (2026-04-09)
-- [x] **Global Voice Manager** (`voiceManager.js`) - WebRTC peer connections, streams, and Audio() elements now live at MainApp level and survive React routing/unmounting
-- [x] **VoiceChannel refactored** - Stripped of local WebRTC state, now a pure UI view consuming voiceManager props
-- [x] **VoiceFloat widget** (`VoiceFloat.js`) - Persistent floating bottom-left panel with mute/deafen/disconnect controls visible on all screens when in a voice call
-- [x] **Navigate-back** - Clicking the float returns user to the active voice channel view
-
-#### Voice UX & Settings Fix (2026-04-10)
-- [x] **Settings dismiss on navigation** - User Settings panel closes when clicking any server, channel, DM, or Friends
-- [x] **Remote speaking indicators** - All participants' tiles light up with emerald border+glow when speaking (not just local user)
-- [x] **Voice join/leave toasts** - Animated notifications when someone connects or disconnects from the channel
-- [x] **Ping display** - Live WebRTC latency shown above voice controls (color-coded: green <80ms, amber <150ms, red 150ms+)
-- [x] **Backend enriched voice_state_update** - Now includes user_joined_name and user_left_name for toast display
+#### P1 Features (Pending)
+- [ ] DM ringing (audio + visual incoming call alerts)
 
 #### P2 Features (Pending)
 - [ ] Self-destructing status messages
 
 #### P3 Features (Pending)
-- [ ] Native app skeletons (Linux, Windows, iOS, Android)
-
-### Refactoring Notes
-- `server.py` is 2970+ lines — split into modular routers recommended
+- [ ] Native app skeletons (Linux)
