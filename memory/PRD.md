@@ -56,6 +56,13 @@ A self-hosted, privacy-focused Discord replacement with end-to-end encryption, r
 - [x] **VoiceFloat widget** (`VoiceFloat.js`) - Persistent floating bottom-left panel with mute/deafen/disconnect controls visible on all screens when in a voice call
 - [x] **Navigate-back** - Clicking the float returns user to the active voice channel view
 
+#### Voice UX & Settings Fix (2026-04-10)
+- [x] **Settings dismiss on navigation** - User Settings panel closes when clicking any server, channel, DM, or Friends
+- [x] **Remote speaking indicators** - All participants' tiles light up with emerald border+glow when speaking (not just local user)
+- [x] **Voice join/leave toasts** - Animated notifications when someone connects or disconnects from the channel
+- [x] **Ping display** - Live WebRTC latency shown above voice controls (color-coded: green <80ms, amber <150ms, red 150ms+)
+- [x] **Backend enriched voice_state_update** - Now includes user_joined_name and user_left_name for toast display
+
 #### P2 Features (Pending)
 - [ ] Self-destructing status messages
 
