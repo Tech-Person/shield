@@ -919,6 +919,63 @@ async def get_wireguard_status(user: dict = Depends(get_current_user)):
     
     return result
 
+# ==================== WIREGUARD CONTROL ROUTES ====================
+
+class WireguardAction(BaseModel):
+    action: str  # "start", "stop", "restart"
+
+@api_router.post("/system/wireguard/control")
+async def control_wireguard(data: WireguardAction, admin: dict = Depends(require_admin)):
+    """Start, stop, or restart WireGuard tunnel (admin only)"""
+    if data.action not in ["start", "stop", "restart"]:
+        raise HTTPException(status_code=400, detail="Invalid action. Use 'start', 'stop', or 'restart'")
+    
+    if SIMULATION_MODE:
+        return {
+            "success": True,
+            "action": data.action,
+            "message": f"[SIMULATED] WireGuard {data.action} command executed",
+            "simulation_mode": True
+        }
+    
+    if WIREGUARD_DOCKER_CONTAINER:
+        # WireGuard runs in Docker - control the container
+        if data.action == "start":
+            success, output = run_command(['docker', 'start', WIREGUARD_DOCKER_CONTAINER])
+        elif data.action == "stop":
+            success, output = run_command(['docker', 'stop', WIREGUARD_DOCKER_CONTAINER])
+        elif data.action == "restart":
+            success, output = run_command(['docker', 'restart', WIREGUARD_DOCKER_CONTAINER])
+        
+        if success:
+            return {
+                "success": True,
+                "action": data.action,
+                "message": f"Docker container '{WIREGUARD_DOCKER_CONTAINER}' {data.action}ed successfully",
+                "docker_container": WIREGUARD_DOCKER_CONTAINER
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to {data.action} container: {output}")
+    else:
+        # WireGuard runs on host - use wg-quick
+        if data.action == "start":
+            success, output = run_command(['wg-quick', 'up', WIREGUARD_INTERFACE])
+        elif data.action == "stop":
+            success, output = run_command(['wg-quick', 'down', WIREGUARD_INTERFACE])
+        elif data.action == "restart":
+            # Stop then start
+            run_command(['wg-quick', 'down', WIREGUARD_INTERFACE])
+            success, output = run_command(['wg-quick', 'up', WIREGUARD_INTERFACE])
+        
+        if success:
+            return {
+                "success": True,
+                "action": data.action,
+                "message": f"WireGuard interface '{WIREGUARD_INTERFACE}' {data.action}ed successfully"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"Failed to {data.action} WireGuard: {output}")
+
 # ==================== SETTINGS ROUTES ====================
 
 class PortRangeSettings(BaseModel):

@@ -45,7 +45,10 @@ import {
   Wifi,
   WifiOff,
   Clock,
-  RefreshCw
+  RefreshCw,
+  Play,
+  Square,
+  RotateCw
 } from 'lucide-react';
 import ChangePasswordDialog from '../components/ChangePasswordDialog';
 
@@ -104,6 +107,20 @@ export default function DashboardPage() {
       console.error('Failed to fetch WireGuard status');
     }
   }, [getAuthHeaders]);
+
+  const handleWireguardControl = async (action) => {
+    try {
+      const response = await axios.post(`${API}/system/wireguard/control`, 
+        { action },
+        { headers: getAuthHeaders() }
+      );
+      toast.success(response.data.message);
+      // Refresh status after a short delay
+      setTimeout(fetchWireguardStatus, 2000);
+    } catch (error) {
+      toast.error(error.response?.data?.detail || `Failed to ${action} WireGuard`);
+    }
+  };
 
   useEffect(() => {
     fetchData();
@@ -390,6 +407,39 @@ export default function DashboardPage() {
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Clock className="w-3 h-3" />
                     <span className="font-mono text-xs">{wireguardStatus.last_handshake}</span>
+                  </div>
+                )}
+
+                {/* WireGuard Control Buttons (Admin only) */}
+                {user?.role === 'admin' && (
+                  <div className="flex items-center gap-1 ml-2 pl-2 border-l border-zinc-700">
+                    {wireguardStatus.status === 'down' ? (
+                      <button 
+                        onClick={() => handleWireguardControl('start')}
+                        className="p-1.5 rounded bg-emerald-600/20 hover:bg-emerald-600/40 transition-colors"
+                        title="Start WireGuard"
+                        data-testid="wireguard-start-btn"
+                      >
+                        <Play className="w-3 h-3 text-emerald-400" />
+                      </button>
+                    ) : (
+                      <button 
+                        onClick={() => handleWireguardControl('stop')}
+                        className="p-1.5 rounded bg-red-600/20 hover:bg-red-600/40 transition-colors"
+                        title="Stop WireGuard"
+                        data-testid="wireguard-stop-btn"
+                      >
+                        <Square className="w-3 h-3 text-red-400" />
+                      </button>
+                    )}
+                    <button 
+                      onClick={() => handleWireguardControl('restart')}
+                      className="p-1.5 rounded bg-blue-600/20 hover:bg-blue-600/40 transition-colors"
+                      title="Restart WireGuard"
+                      data-testid="wireguard-restart-btn"
+                    >
+                      <RotateCw className="w-3 h-3 text-blue-400" />
+                    </button>
                   </div>
                 )}
                 
